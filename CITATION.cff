@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the corresponding paper once available."
+title: "Chemotactic particles simulator KSNP-v7.1"
+authors:
+  - family-names: Rudyak
+    given-names: Vladimir
+version: 0.1.0
+doi: "TODO: add DOI once paper is published"
+date-released: 2025-12-23
+url: "https://github.com/yourusername/your-repo"
+repository-code: "https://github.com/yourusername/your-repo"
+license: "MIT"

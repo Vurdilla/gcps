@@ -1,0 +1,3 @@
+python3 plot_PCcumulative_v3.py N0032_tauSC0125_tsim10Kx1_PCcumulative.txt N0032_tauSC0125_tsim10Kx1_PCcumulative.png -6.5 -1.5 1 300 1 1 1 >plot1.out 2>&1 & 
+python3 plot_PCcumulative_v3.py N0032_tauSC0125_tsim10Kx1_PCreg.txt N0032_tauSC0125_tsim10Kx1_PCreg.png -6.5 -1.5 1 300 1 1 1 >plot2.out 2>&1 & 
+python3 plot_PCcumulative_v3.py N0032_tauSC0125_tsim10Kx1_SCreg.txt N0032_tauSC0125_tsim10Kx1_SCreg.png 2 5 1 300 1 1 1 >plot3.out 2>&1 & 

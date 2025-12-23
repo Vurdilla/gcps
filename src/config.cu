@@ -1,0 +1,14 @@
+#ifndef VC3_PHYS_KSNP_CONFIG
+#define VC3_PHYS_KSNP_CONFIG
+
+#define NUM_GPU_LIMIT 1
+#define MAX_STREAMS_PER_GPU 64
+#define DEFAULT_STREAMS_PER_GPU 1
+
+#define RELEASE_MODE
+//#define KERNELTIME
+//#define DEBUG0
+//#define DEBUG1
+//#define DEBUG2
+
+#endif // VC3_PHYS_KSNP_CONFIG
