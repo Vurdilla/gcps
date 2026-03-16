@@ -1,12 +1,12 @@
-# KSNP: GPU Chemotactic Particles Simulator
+# GPU Chemotactic Particles Simulator (GCPS)
 
 > **Short description:** High-performance CUDA C++ simulation of chemotactic active searchers with scent deposition, pairwise interactions, and stochastic resetting mechanisms.
 
 ## Summary
 
-KSNP is a high-performance simulation framework designed to model the collective dynamics of active matter, specifically focusing on "searcher" particles that interact with a dynamic chemical environment. The simulator couples agent-based Langevin dynamics with a grid-based representation of a scalar field (scent), allowing particles to modify their environment through deposition and navigate it via chemotaxis.
+GCPS is a high-performance simulation framework designed to model the collective dynamics of active matter, specifically focusing on "searcher" particles that interact with a dynamic chemical environment. The simulator couples agent-based Langevin dynamics with a grid-based representation of a scalar field (scent), allowing particles to modify their environment through deposition and navigate it via chemotaxis.
 
-The core physics engine accounts for pairwise particle interactions (e.g., soft repulsion) accelerated by spatial hashing, complex boundary conditions, and varying chemosensitivity models (e.g., gradient vs. log-gradient sensing). A distinguishing feature of KSNP-v7.1 is its extensive support for stochastic resetting mechanisms, allowing researchers to investigate how timed or spatial resets affect search efficiency in complex landscapes populated with active targets. Built on CUDA C++ and OpenMP, KSNP-v7.1 supports multi-stream execution, enabling massive parallel parameter sweeps on a single GPU.
+The core physics engine accounts for pairwise particle interactions (e.g., soft repulsion) accelerated by spatial hashing, complex boundary conditions, and varying chemosensitivity models (e.g., gradient vs. log-gradient sensing). A distinguishing feature of GCPS-v7.1 is its extensive support for stochastic resetting mechanisms, allowing researchers to investigate how timed or spatial resets affect search efficiency in complex landscapes populated with active targets. Built on CUDA C++ and OpenMP, KSNP-v7.1 supports multi-stream execution, enabling massive parallel parameter sweeps on a single GPU.
 
 ## Features
 
@@ -54,12 +54,12 @@ The executable requires 5 command-line arguments to define the simulation enviro
 
 **Syntax:**
 ```bash
-./KSNP-v7.1-sm80 <task.ini> <gpu_id> <num_streams> <seed> <output_prefix>
+./GCPS-v7.1-sm80 <task.ini> <gpu_id> <num_streams> <seed> <output_prefix>
 ```
 
 **Typical execution example:**
 ```bash    
-./KSNP-v7.1-sm80 N1024_tauSC0125_tsim1Kx1.ini 0 8 0 N1024_tauSC0125_tsim1Kx1 > N1024_tauSC0125_tsim1Kx1.out 2>&1 & 
+./GCPS-v7.1-sm80 N1024_tauSC0125_tsim1Kx1.ini 0 8 0 N1024_tauSC0125_tsim1Kx1 > N1024_tauSC0125_tsim1Kx1.out 2>&1 & 
 ```
 
 In this example:
