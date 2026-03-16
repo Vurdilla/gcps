@@ -1,9 +1,9 @@
-objects = KSNP-v7.1-main.cu
+objects = GCPS-v7.1-main.cu
 
    FC = nvcc
    FFLAGS =
    LDFLAGS = -std=c++11 -Xcompiler="-fopenmp -Wno-terminate -Wno-noexcept-type -Wno-deprecated" -gencode arch=compute_80,code=sm_80 -gencode arch=compute_75,code=sm_75 -DMPICH_IGNORE_CXX_SEEK -O3
-   TARGET = KSNP-v7.1-sm80
+   TARGET = GCPS-v7.1-sm80
 
 default: $(objects) 
 	$(FFLAGS) $(FC) $(LDFLAGS) -o $(TARGET) $(objects)
