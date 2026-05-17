@@ -113,14 +113,17 @@ Standard console output is redirected to .out, as well as error output. Runs in 
 **TODO**: list specific example files, run durations, and expected outputs.
 
 
-## Scripts / Postprocessing
+## Model flexibility
 
-**TODO**
+Here are several parts of the code, where physics is explicitly separated from the technicalities of CUDA, and thus can be easily modified within the existing simulations workflow:
+- Initial state of the particles: kernel_init.cu, lines 63--92 (positions), line 100 (rotation);
+- The equations for the pairwise forces: kernel_pairwiseForcesHashing.cu, lines 89--92;
+- The shape of the chemosecretion profile: kernel_leaveScentMark.cu, lines 26--47 (for non-PBC) and lines 91--92 (for PBC);
+- Boundary shape: kernel_moveParticles.cu, lines 272--284;
+- Resetting rate distribution: kernel_moveParticles.cu, lines 344--354 (during the simulations); kernel_init.cu, lines 356--377 (at the beginning of simulations);
+- The equations for the action of chemotactic field and its gradient: kernel_moveParticles.cu, lines 101--116 (current velocity), lines 161--168 (internal angle);
+- On-the-fly trajectory analysis (computed on CPU host in parallel to GPU computations, no CUDA knowledge needed): simdata.cu (defines measured data); runner.cu, lines 172--388 (computes measured data); simulator.cu, lines 140--413 (writes measured data to the log file).
 
-Run visualization:
-```bash
-python scripts/visualize.py --input examples/minimal/output --save figures/
-```
 
 ## Citation 
 
