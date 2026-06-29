@@ -1,3 +1,5 @@
+# Important: ***BIG UPDATE COMING IN BEGINNING OF JULY***
+
 # GPU Chemotactic Particles Simulator (GCPS)
 
 > **Short description:** High-performance CUDA C++ simulation of chemotactic active searchers with scent deposition, pairwise interactions, and stochastic resetting mechanisms.
