@@ -1,12 +1,25 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite the corresponding paper once available."
-title: "GPU Chemotactic Particles Simulator GCPS-v7.1"
+message: "If you use this software, please cite the paper below."
+title: "GPU Chemotactic Particles Simulator (GCPS)"
+version: 7.1
 authors:
   - family-names: Rudyak
     given-names: Vladimir
-version: 7.1
-doi: "TODO: add DOI once paper is published"
-date-released: 2026-03-16
 url: "https://github.com/Vurdilla/ksnp-cuda"
 repository-code: "https://github.com/Vurdilla/ksnp-cuda"
 license: "MIT"
+date-released: 2026-03-16
+
+preferred-citation:
+  type: article
+  title: "Efficient open-source GPU implementation for multi-agent autochemotactic 2D modeling"
+  authors:
+    - family-names: Rudyak
+      given-names: Vladimir
+      name-particle: "Yu."
+    - family-names: Roichman
+      given-names: Yael
+  journal: "Computer Physics Communications"
+  year: 2026
+  doi: "10.1016/j.cpc.2026.110285"
+  url: "https://doi.org/10.1016/j.cpc.2026.110285"
