@@ -129,7 +129,11 @@ Here are several parts of the code, where physics is explicitly separated from t
 
 ## Citation 
 
-**TODO** Add citation and DOI
+CIte this work when using the code:
+Efficient open-source GPU implementation for multi-agent autochemotactic 2D modeling, Vladimir Yu. Rudyak, Yael Roichman, Computer Physics Communications, 2026
+DOI: 10.1016/j.cpc.2026.110285
+https://doi.org/10.1016/j.cpc.2026.110285
+https://www.sciencedirect.com/science/article/pii/S0010465526002675
 See CITATION.cff file.
 
 
