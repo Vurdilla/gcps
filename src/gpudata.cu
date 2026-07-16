@@ -16,15 +16,29 @@ struct gpu_setup_variables{
     // searcher parameters
     int nParticles; // number of particles, default = 1
     int chemosensitivityModel; // chemosensitivity model: 0 - ~ gradient of SC, 1 - gradient of log(SC)
-    flt2 V0; // searcher velocity, default =  1
+    // searcher velocity, default =  1
+    int V0_distr; // 0 - single value, 1 - bimodal, 2 - uniform, 3 - log-uniform, 4 - gaussian, 5 - log-gaussian
+    flt2 V0, V0_min, V0_max, V0_bias, V0_mean, V0_sigma;
     bool keepV0Constant; // use equations with constant V0, default = false
-    flt2 rotationalDiffusion; // rotationbal diffusion coefficient, default = 1.0
+    flt2 VDecayTime; // searcher velocity relaxation rate, default = 1.0
+    // rotationbal diffusion coefficient, default = 1.0
+    int rotationalDiffusion_distr; // 0 - single value, 1 - bimodal, 2 - uniform, 3 - log-uniform, 4 - gaussian, 5 - log-gaussian
+    flt2 rotationalDiffusion, rotationalDiffusion_min, rotationalDiffusion_max, rotationalDiffusion_bias, rotationalDiffusion_mean, rotationalDiffusion_sigma;
     flt2 Rscent; // scent raduis, default = 0.05
-    flt2 beta0; // default = 0.005
-    flt2 betaDecayTime; // default = 1.0
-    flt2 chiRot; // default =  0.2
-    flt2 chiTrans; // default =  0.015
-    flt2 SC0; // scent noise level, default = 1.00
+    // searcher chemodeposition rate, default = 0.005
+    int beta0_distr; // 0 - single value, 1 - bimodal, 2 - uniform, 3 - log-uniform, 4 - gaussian, 5 - log-gaussian
+    flt2 beta0, beta0_min, beta0_max, beta0_bias, beta0_mean, beta0_sigma;
+    // searcher chemodeposition relaxation rate, default = 1.0
+    flt2 betaDecayTime;
+    // rotational chemosensitivity, default =  0.2
+    int chiRot_distr; // 0 - single value, 1 - bimodal, 2 - uniform, 3 - log-uniform, 4 - gaussian, 5 - log-gaussian
+    flt2 chiRot, chiRot_min, chiRot_max, chiRot_bias, chiRot_mean, chiRot_sigma;
+    // translational chemosensitivity, default =  0.015
+    int chiTrans_distr; // 0 - single value, 1 - bimodal, 2 - uniform, 3 - log-uniform, 4 - gaussian, 5 - log-gaussian
+    flt2 chiTrans, chiTrans_min, chiTrans_max, chiTrans_bias, chiTrans_mean, chiTrans_sigma;
+    // scent noise level, default = 1.00
+    int SC0_distr; // 0 - single value, 1 - bimodal, 2 - uniform, 3 - log-uniform, 4 - gaussian, 5 - log-gaussian
+    flt2 SC0, SC0_min, SC0_max, SC0_bias, SC0_mean, SC0_sigma;
 
     // pairwise searcher interactions
     flt2 PPepsilon; // LJ epsilon
@@ -32,9 +46,10 @@ struct gpu_setup_variables{
 
     // system parameters
     flt2 boxSize; // the grid on which the concentration shall be calculated is 2L-by-2L, default = 1
-    int boundaryType; // boundary: 0 - square, 1 - circle
+    int boundaryType; // boundary: 0 - circle, 1 - square, 2 - square PBC
     flt2 scentDecayTime; // scent decay time, default = 1.00
     int initialNTRtype; // initian next time time reset type: 0 - same as regular, 1 - random at (0, timedResetMeanTime)
+    int initialParticlePos; // 0 - center of arena, 1 - uniform distribution across arene area
 
     // home potential
     int homeType; // home type: 1 - parabolic potential, 2 - conical potential
@@ -48,11 +63,13 @@ struct gpu_setup_variables{
     //   2 - reverse direction + one timestep backward
     flt2 timedResetMeanTime; // average time between resets, default = 50
     bool timedResetHomePotential; // does timed reset switches on home potential sensing
+    flt2 globalResetTime; // time marker for all-particle reset, default -1 (not set), active when non-negative
 
     // boundary parameters
     int boundaryResetType; // boundary reset: 0 - position to the center + random direction, 1 - direction to the center + one timestep towards center,
     //   2 - reverse direction + one timestep backward
     flt2 betaBoundaryMult; // beta multiplication coefficient when particle hits boundary
+    flt2 VBoundary; // velocity when particle hits boundary
     bool boundaryResetSRtime; // does boundary hit reset stochastic reset time or not
     bool boundaryHomePotential; // does boundary hit switches on home potential sensing
 
@@ -80,6 +97,7 @@ struct gpu_precomputes {
     flt2 invdl; // = 1.00 / dl
     flt2 halfBox; // = boxSize * 0.50
     flt2 betaDecayRate; // = gpusetup_variables->betaDecayTime > 0.00 ? exp(-gpusetup_variables->timeStep / gpusetup_variables->betaDecayTime) : 1.00
+    flt2 VDecayRate; // = gpusetup_variables->VDecayTime > 0.00 ? exp(-gpusetup_variables->timeStep / gpusetup_variables->VDecayTime) : 1.00
     flt2 Rscentinv; // = 1 / Rscent
     flt2 Rscent2inv; // = 1 / Rscent / Rscent
     flt2 SCmark_cutoff; // = gpusetup_variables->Rscent * gpusetup_variables->Rscent_cutoffMultiplier
@@ -107,6 +125,10 @@ struct gpu_targets{
     /** Is target active
     * Array of bool, size: nTargets **/
     bool* target_active;
+
+    /** Was target deactivated
+    * Array of bool, size: nTargets **/
+    bool* target_deactivated;
 
     /** Target position
     * Array of cuvector2D, size: nTargets **/
@@ -144,6 +166,10 @@ struct gpu_targets{
     /** Target beta multiplication
     * Array of flt2, size: nTargets **/
     flt2* target_betaMult;
+
+    /** Target particle velocity after hit
+    * Array of flt2, size: nTargets **/
+    flt2* target_V;
 
     /** Is target hit resets stochastic reset time or not
     * Array of int, size: nTargets **/
@@ -206,20 +232,23 @@ struct gpu_particles{
     vc3_cumath::planar::cuvector *particle_GSC; // Scent gradient at particle position
     vc3_cumath::planar::cuvector* particle_PPforce; // Particle-particle interaction force
     vc3_cumath::planar::cuvector* particle_PPforceSpatialHashing; // // Particle-particle interaction force, spatial hashing computed
-    flt2* particle_beta0; // Particle default chemoattractant deposition rate, default
+    flt2 *particle_V0; // Particle default velocity
+    flt2 *particle_V; // Particle current velocity
+    flt2 *particle_beta0; // Particle default chemoattractant deposition rate, default
     flt2 *particle_beta; // Particle chemoattractant deposition rate, current
     flt2 *particle_chiT; // Particle translational chemosensitivity
-    flt2* particle_chiR; // Particle rotational chemosensitivity
-    flt2* particle_c0; // Particle chemosensitivity noise level
-    flt2* particle_DR; // Particle rotational diffusion coefficient
-    flt2* particle_NRT; // Particle next reset time
-    bool* particle_flag_boundaryHit; // Particle flags, boundary hit
-    int* particle_flag_targetHit; // Particle flags, target hit, -1 means no hit, >=0 means target ID
-    bool* particle_flag_timedReset; // Particle flags, timed reset
+    flt2 *particle_chiR; // Particle rotational chemosensitivity
+    flt2 *particle_c0; // Particle chemosensitivity noise level
+    flt2 *particle_DR; // Particle rotational diffusion coefficient
+    flt2 *particle_NRT; // Particle next reset time
+    bool *particle_flag_boundaryHit; // Particle flags, boundary hit
+    int *particle_flag_targetHit; // Particle flags, target hit, -1 means no hit, >=0 means target ID
+    bool *particle_flag_timedReset; // Particle flags, timed reset
+    bool *particle_flag_wasResetToCenter; // Particle flags, was reset to center (due to any possible reason)
     curandState *particle_curandstate; // Random number generator 
-    int* particle_ID; // Particle ID
+    int *particle_ID; // Particle ID
     // Arrays for the linked-list hash grid
-    int* particle_next_in_cell;
+    int *particle_next_in_cell;
     vc3_cumath::planar::cusizevector* particle_cell_coord;
 
 }; //struct gpu_particles
@@ -239,11 +268,20 @@ struct gpu_particle_stats
     * Array of flt2, size: nParticles x gpuHistoryLength **/
     flt2* particle_angle_history;
 
+    /** Particle current velocity history
+    * Array of flt2, size: nParticles x gpuHistoryLength **/
+    flt2* particle_V_history;
+
+    /** Particle current beta history
+    * Array of flt2, size: nParticles x gpuHistoryLength **/
+    flt2* particle_beta_history;
+
     /** Particle flags history
     * Array of bool, size: nParticles x gpuHistoryLength **/
     bool* particle_flag_boundaryHit_history; // boundary hit
     int* particle_flag_targetHit_history; // target hit, -1 means no hit, >=0 means target ID
     bool* particle_flag_timedReset_history; // timed reset
+    bool* particle_flag_wasResetToCenter_history; // particle was reset to center (due to any possible reason)
 
 }; //struct gpu_particle_stats
 
@@ -262,15 +300,59 @@ __host__ void gpu_setup_variables::set(const setupParameters &p)
     // searcher parameters
     nParticles = p.nParticles; // number of particles, default = 1
     chemosensitivityModel = p.chemosensitivityModel; // chemosensitivity model: 0 - ~ gradient of SC, 1 - gradient of log(SC)
-    V0 = p.V0; // searcher velocity, default =  1
+    // searcher velocity
+    V0_distr = p.V0_distr;
+    V0 = p.V0;
+    V0_min = p.V0_min;
+    V0_max = p.V0_max;
+    V0_bias = p.V0_bias;
+    V0_mean = p.V0_mean;
+    V0_sigma = p.V0_sigma;
     keepV0Constant = p.keepV0Constant; // use equations with constant V0, default = false
-    rotationalDiffusion = p.rotationalDiffusion; // rotationbal diffusion coefficient, default = 1.0
+    VDecayTime = p.VDecayTime; // searcher velocity relaxation rate, default = 1.0
+    // rotationbal diffusion coefficient
+    rotationalDiffusion_distr = p.rotationalDiffusion_distr;
+    rotationalDiffusion = p.rotationalDiffusion;
+    rotationalDiffusion_min = p.rotationalDiffusion_min;
+    rotationalDiffusion_max = p.rotationalDiffusion_max;
+    rotationalDiffusion_bias = p.rotationalDiffusion_bias;
+    rotationalDiffusion_mean = p.rotationalDiffusion_mean;
+    rotationalDiffusion_sigma = p.rotationalDiffusion_sigma;
     Rscent = p.Rscent; // scent raduis, default = 0.05
-    beta0 = p.beta0; // default = 0.005
-    betaDecayTime = p.betaDecayTime; // default = 1.0
-    chiRot = p.chiRot; // default =  0.2
-    chiTrans = p.chiTrans; // default =  0.015
-    SC0 = p.SC0; // scent noise level, default = 1.00
+    // searcher chemodeposition rate
+    beta0_distr = p.beta0_distr;
+    beta0 = p.beta0;
+    beta0_min = p.beta0_min;
+    beta0_max = p.beta0_max;
+    beta0_bias = p.beta0_bias;
+    beta0_mean = p.beta0_mean;
+    beta0_sigma = p.beta0_sigma;
+    // searcher chemodeposition relaxation rate
+    betaDecayTime = p.betaDecayTime;
+    // rotational chemosensitivity
+    chiRot_distr = p.chiRot_distr;
+    chiRot = p.chiRot;
+    chiRot_min = p.chiRot_min;
+    chiRot_max = p.chiRot_max;
+    chiRot_bias = p.chiRot_bias;
+    chiRot_mean = p.chiRot_mean;
+    chiRot_sigma = p.chiRot_sigma;
+    // translational chemosensitivity
+    chiTrans_distr = p.chiTrans_distr;
+    chiTrans = p.chiTrans;
+    chiTrans_min = p.chiTrans_min;
+    chiTrans_max = p.chiTrans_max;
+    chiTrans_bias = p.chiTrans_bias;
+    chiTrans_mean = p.chiTrans_mean;
+    chiTrans_sigma = p.chiTrans_sigma;
+    // scent noise level
+    SC0_distr = p.SC0_distr;
+    SC0 = p.SC0;
+    SC0_min = p.SC0_min;
+    SC0_max = p.SC0_max;
+    SC0_bias = p.SC0_bias;
+    SC0_mean = p.SC0_mean;
+    SC0_sigma = p.SC0_sigma;
 
     // pairwise searcher interactions
     PPepsilon = p.PPepsilon; // LJ epsilon
@@ -281,6 +363,7 @@ __host__ void gpu_setup_variables::set(const setupParameters &p)
     boundaryType = p.boundaryType; // boundary: 0 - square, 1 - circle
     scentDecayTime = p.scentDecayTime; // scent decay time, default = 1.00
     initialNTRtype = p.initialNTRtype; // initian next time time reset type: 0 - same as regular, 1 - random at (0, timedResetMeanTime)
+    initialParticlePos = p.initialParticlePos; // 0 - center of arena, 1 - uniform distribution across arena area
 
     // home potential
     homeType = p.homeType; // home type: 1 - parabolic potential, 2 - conical potential
@@ -294,11 +377,13 @@ __host__ void gpu_setup_variables::set(const setupParameters &p)
     //   2 - reverse direction + one timestep backward
     timedResetMeanTime = p.timedResetMeanTime; // average time between resets, default = 50
     timedResetHomePotential = p.timedResetHomePotential; // does timed reset switches on home potential sensing
+    globalResetTime = p.globalResetTime; // time marker for all-particle reset, default -1 (not set), active when non-negative
 
     // boundary parameters
     boundaryResetType = p.boundaryResetType; // boundary reset: 0 - position to the center + random direction, 1 - direction to the center + one timestep towards center,
     //   2 - reverse direction + one timestep backward
     betaBoundaryMult = p.betaBoundaryMult; // beta multiplication coefficient when particle hits boundary
+    VBoundary = p.VBoundary; // velocity when particle hits boundary
     boundaryResetSRtime = p.boundaryResetSRtime; // does boundary hit reset stochastic reset time or not
     boundaryHomePotential = p.boundaryHomePotential; // does boundary hit switches on home potential sensing
 
@@ -323,7 +408,14 @@ __host__ void gpu_precomputes::set(const setupParameters& p)
     dl = p.boxSize / flt2(p.latticeSize - 1);
     invdl = 1.00 / dl;
     halfBox = p.boxSize * 0.50;
-    betaDecayRate = p.betaDecayTime > 0.00 ? exp(-p.timeStep / p.betaDecayTime) : 1.00;
+    // Beta decay: positive = there is a decay, zero = no decay, negative = reset to beta0 every timestep
+    betaDecayRate = 0.00;
+    if(p.betaDecayTime > 0.00) betaDecayRate = exp(-p.timeStep / p.betaDecayTime);
+    else if(p.betaDecayTime < 0.00) betaDecayRate = -1.00;
+    // Velocity decay: positive = there is a decay, zero = no decay, negative = reset to v0 every timestep
+    VDecayRate = 0.00;
+    if(p.VDecayTime > 0.00) VDecayRate = exp(-p.timeStep / p.VDecayTime);
+    else if(p.VDecayTime < 0.00) VDecayRate = -1.00;
     Rscentinv = 1.00 / p.Rscent;
     Rscent2inv = 1.00 / p.Rscent / p.Rscent;
     SCmark_cutoff = p.Rscent * p.Rscent_cutoffMultiplier;

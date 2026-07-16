@@ -16,6 +16,8 @@ struct logData
     flt2 timeRunner_runSimulation;
     flt2 timeRunner_runOneStep;
     flt2 timeRunner_collectStat;
+    flt2 timeSolver_scenarios;
+    flt2 timeSolver_ppInteractions;
     flt2 timeSolver_moveParticles;
     flt2 timeSolver_leaveScentMarks;
     flt2 timeSolver_postParticles;
@@ -36,6 +38,8 @@ int logData::initialize()
     timeRunner_runSimulation = 0.0;
     timeRunner_runOneStep = 0.0;
     timeRunner_collectStat = 0.0;
+    timeSolver_scenarios = 0.0;
+    timeSolver_ppInteractions = 0.0;
     timeSolver_moveParticles = 0.0;
     timeSolver_leaveScentMarks = 0.0;
     timeSolver_postParticles = 0.0;
@@ -56,6 +60,8 @@ int logData::addTo(logData* addto) const
     addto->timeRunner_runSimulation += this->timeRunner_runSimulation;
     addto->timeRunner_runOneStep += this->timeRunner_runOneStep;
     addto->timeRunner_collectStat += this->timeRunner_collectStat;
+    addto->timeSolver_scenarios += this->timeSolver_scenarios;
+    addto->timeSolver_ppInteractions += this->timeSolver_ppInteractions;
     addto->timeSolver_moveParticles += this->timeSolver_moveParticles;
     addto->timeSolver_leaveScentMarks += this->timeSolver_leaveScentMarks;
     addto->timeSolver_postParticles += this->timeSolver_postParticles;

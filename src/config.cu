@@ -7,8 +7,10 @@
 
 #define RELEASE_MODE
 //#define KERNELTIME
+//#define NOATOMIC
 //#define DEBUG0
 //#define DEBUG1
 //#define DEBUG2
+
 
 #endif // VC3_PHYS_KSNP_CONFIG

@@ -22,6 +22,7 @@
 #include "gpudata.cu"
 #include "kernelTimerAsync.cu"
 #include "kernel_init.cu"
+#include "kernel_scenariosParticles.cu"
 #include "kernel_pairwiseForcesSimple.cu"
 #include "kernel_pairwiseForcesHashing.cu"
 #include "kernel_moveParticles.cu"
@@ -41,7 +42,7 @@ class KSNPSolver
 public:
     /** Constructor
     **/
-    KSNPSolver(cudaStream_t& stream, setupParameters setup, int randseed=0, int seedoffset=1) noexcept;
+    KSNPSolver(cudaStream_t& stream, setupParameters setup, int randseed=0, int iter=0) noexcept;
 
     /** Run one step
     **/
@@ -69,6 +70,10 @@ protected:
     /** Generate a set of targets based on the current setup
     **/
     int generate_targets() noexcept;
+
+    /** Apply scenarios
+    **/
+    int scenarios(cudaStream_t& stream) noexcept;
 
     /** Calculate pairwise particle-particle interactions
         LJ with cutoff
@@ -108,6 +113,7 @@ protected:
     flt2 _r2max;
     int _SCmark_dl_cutoff; // number of lattice steps in scent mark cutoff
     long long int _stepsSinceScentDivideFactorRenorm;
+    gpu_particles _cpu_particle_properties; // static properties of particle generatied at initializations
     gpu_particle_stats _cpu_particles_stats; // length of gpu history + 1, as the first element stores the last pre-history state
     gpu_targets _cputargets;
     logData _timing;
@@ -132,6 +138,13 @@ protected:
 
 vc3_phys::KSNPSolver::KSNPSolver(cudaStream_t& stream, vc3_phys::setupParameters setup, int randseed, int iter) noexcept
 {
+#ifdef DEBUG0
+    int mydevice;
+    cudaGetDevice(&mydevice);
+    std::cout << "\nKSNPSolver::KSNPSolver() initialization on GPU#" << mydevice << "\n";
+    std::cout.flush();
+#endif
+
     // 0. Define default kernel thread number on GPU
     // ==================
     _threadsPerBlock = 512;
@@ -165,6 +178,18 @@ vc3_phys::KSNPSolver::KSNPSolver(cudaStream_t& stream, vc3_phys::setupParameters
     _SCmark_dl_cutoff = _SCmark_cutoff / _dl;
     if (_SCmark_dl_cutoff * _dl < _SCmark_cutoff) _SCmark_dl_cutoff++;
     _stepsSinceScentDivideFactorRenorm = 0;
+#ifdef DEBUG0
+    std::cout << "\KSNPSolver::KSNPSolver() - allocating _cpu_particle_properties\n";
+    std::cout.flush();
+#endif
+    SAFE_CALL(cudaMallocHost(&_cpu_particle_properties.particle_V0, sizeof(flt2) * _setup.nParticles));
+    SAFE_CALL(cudaMallocHost(&_cpu_particle_properties.particle_V, sizeof(flt2) * _setup.nParticles));
+    SAFE_CALL(cudaMallocHost(&_cpu_particle_properties.particle_beta0, sizeof(flt2) * _setup.nParticles));
+    SAFE_CALL(cudaMallocHost(&_cpu_particle_properties.particle_chiT, sizeof(flt2) * _setup.nParticles));
+    SAFE_CALL(cudaMallocHost(&_cpu_particle_properties.particle_chiR, sizeof(flt2) * _setup.nParticles));
+    SAFE_CALL(cudaMallocHost(&_cpu_particle_properties.particle_c0, sizeof(flt2) * _setup.nParticles));
+    SAFE_CALL(cudaMallocHost(&_cpu_particle_properties.particle_DR, sizeof(flt2) * _setup.nParticles));
+
     int cpu_history_size = _setup.nParticles * (_setup.gpuHistoryLength + 1);
 #ifdef DEBUG0
     std::cout << "\KSNPSolver::KSNPSolver() - allocating _cpu_particles_stats" << cpu_history_size << "\n";
@@ -172,9 +197,12 @@ vc3_phys::KSNPSolver::KSNPSolver(cudaStream_t& stream, vc3_phys::setupParameters
 #endif
     SAFE_CALL(cudaMallocHost(&_cpu_particles_stats.particle_pos_history, sizeof(vc3_cumath::planar::cuvector) * cpu_history_size));
     SAFE_CALL(cudaMallocHost(&_cpu_particles_stats.particle_angle_history, sizeof(flt2) * cpu_history_size));
+    SAFE_CALL(cudaMallocHost(&_cpu_particles_stats.particle_V_history, sizeof(flt2) * cpu_history_size));
+    SAFE_CALL(cudaMallocHost(&_cpu_particles_stats.particle_beta_history, sizeof(flt2) * cpu_history_size));
     SAFE_CALL(cudaMallocHost(&_cpu_particles_stats.particle_flag_boundaryHit_history, sizeof(bool) * cpu_history_size));
     SAFE_CALL(cudaMallocHost(&_cpu_particles_stats.particle_flag_targetHit_history, sizeof(int) * cpu_history_size));
     SAFE_CALL(cudaMallocHost(&_cpu_particles_stats.particle_flag_timedReset_history, sizeof(bool) * cpu_history_size));
+    SAFE_CALL(cudaMallocHost(&_cpu_particles_stats.particle_flag_wasResetToCenter_history, sizeof(bool) * cpu_history_size));
     _timing.initialize();
 
     SAFE_CALL(cudaMallocHost(&particle_PPforce, sizeof(vc3_cumath::planar::cuvector) * _setup.nParticles));
@@ -221,6 +249,7 @@ vc3_phys::KSNPSolver::KSNPSolver(cudaStream_t& stream, vc3_phys::setupParameters
 #endif
     SAFE_CALL(cudaMalloc((void**)&__gputargets, sizeof(gpu_targets)));
     SAFE_CALL(cudaMalloc((void**)&_gputargets.target_active, sizeof(bool) * _gpusetup_variables.nTargets));
+    SAFE_CALL(cudaMalloc((void**)&_gputargets.target_deactivated, sizeof(bool) * _gpusetup_variables.nTargets));
     SAFE_CALL(cudaMalloc((void**)&_gputargets.target_pos, sizeof(vc3_cumath::planar::cuvector) * _gpusetup_variables.nTargets));
     SAFE_CALL(cudaMalloc((void**)&_gputargets.target_radius, sizeof(flt2) * _gpusetup_variables.nTargets));
     SAFE_CALL(cudaMalloc((void**)&_gputargets.target_radius2, sizeof(flt2) * _gpusetup_variables.nTargets));
@@ -231,11 +260,13 @@ vc3_phys::KSNPSolver::KSNPSolver(cudaStream_t& stream, vc3_phys::setupParameters
     SAFE_CALL(cudaMalloc((void**)&_gputargets.target_terminationTime, sizeof(flt2) * _gpusetup_variables.nTargets));
     SAFE_CALL(cudaMalloc((void**)&_gputargets.target_resetType, sizeof(int) * _gpusetup_variables.nTargets));
     SAFE_CALL(cudaMalloc((void**)&_gputargets.target_betaMult, sizeof(flt2) * _gpusetup_variables.nTargets));
+    SAFE_CALL(cudaMalloc((void**)&_gputargets.target_V, sizeof(flt2) * _gpusetup_variables.nTargets));
     SAFE_CALL(cudaMalloc((void**)&_gputargets.target_resetSRtime, sizeof(int) * _gpusetup_variables.nTargets));
     SAFE_CALL(cudaMalloc((void**)&_gputargets.target_homeType, sizeof(int) * _gpusetup_variables.nTargets));
     // Copy variables to the device
     SAFE_CALL(cudaMemcpyAsync(__gputargets, &_gputargets, sizeof(gpu_targets), cudaMemcpyHostToDevice, stream));
     SAFE_CALL(cudaMemcpyAsync(_gputargets.target_active, _cputargets.target_active, sizeof(bool) * _gpusetup_variables.nTargets, cudaMemcpyHostToDevice, stream));
+    SAFE_CALL(cudaMemcpyAsync(_gputargets.target_deactivated, _cputargets.target_deactivated, sizeof(bool) * _gpusetup_variables.nTargets, cudaMemcpyHostToDevice, stream));
     SAFE_CALL(cudaMemcpyAsync(_gputargets.target_pos, _cputargets.target_pos, sizeof(vc3_cumath::planar::cuvector) * _gpusetup_variables.nTargets, cudaMemcpyHostToDevice, stream));
     SAFE_CALL(cudaMemcpyAsync(_gputargets.target_radius, _cputargets.target_radius, sizeof(flt2) * _gpusetup_variables.nTargets, cudaMemcpyHostToDevice, stream));
     SAFE_CALL(cudaMemcpyAsync(_gputargets.target_radius2, _cputargets.target_radius2, sizeof(flt2) * _gpusetup_variables.nTargets, cudaMemcpyHostToDevice, stream));
@@ -246,6 +277,7 @@ vc3_phys::KSNPSolver::KSNPSolver(cudaStream_t& stream, vc3_phys::setupParameters
     SAFE_CALL(cudaMemcpyAsync(_gputargets.target_terminationTime, _cputargets.target_terminationTime, sizeof(flt2) * _gpusetup_variables.nTargets, cudaMemcpyHostToDevice, stream));
     SAFE_CALL(cudaMemcpyAsync(_gputargets.target_resetType, _cputargets.target_resetType, sizeof(int) * _gpusetup_variables.nTargets, cudaMemcpyHostToDevice, stream));
     SAFE_CALL(cudaMemcpyAsync(_gputargets.target_betaMult, _cputargets.target_betaMult, sizeof(flt2) * _gpusetup_variables.nTargets, cudaMemcpyHostToDevice, stream));
+    SAFE_CALL(cudaMemcpyAsync(_gputargets.target_V, _cputargets.target_V, sizeof(flt2) * _gpusetup_variables.nTargets, cudaMemcpyHostToDevice, stream));
     SAFE_CALL(cudaMemcpyAsync(_gputargets.target_resetSRtime, _cputargets.target_resetSRtime, sizeof(int) * _gpusetup_variables.nTargets, cudaMemcpyHostToDevice, stream));
     SAFE_CALL(cudaMemcpyAsync(_gputargets.target_homeType, _cputargets.target_homeType, sizeof(int) * _gpusetup_variables.nTargets, cudaMemcpyHostToDevice, stream));
     cudaDeviceSynchronize();
@@ -322,6 +354,8 @@ vc3_phys::KSNPSolver::KSNPSolver(cudaStream_t& stream, vc3_phys::setupParameters
     SAFE_CALL(cudaMalloc((void**)&_gpuparticles.particle_GSC, sizeof(vc3_cumath::planar::cuvector) * _setup.nParticles));
     SAFE_CALL(cudaMalloc((void**)&_gpuparticles.particle_PPforce, sizeof(vc3_cumath::planar::cuvector) * _setup.nParticles));
     SAFE_CALL(cudaMalloc((void**)&_gpuparticles.particle_PPforceSpatialHashing, sizeof(vc3_cumath::planar::cuvector) * _setup.nParticles));
+    SAFE_CALL(cudaMalloc((void**)&_gpuparticles.particle_V0, sizeof(flt2) * _setup.nParticles));
+    SAFE_CALL(cudaMalloc((void**)&_gpuparticles.particle_V, sizeof(flt2) * _setup.nParticles));
     SAFE_CALL(cudaMalloc((void**)&_gpuparticles.particle_beta0, sizeof(flt2) * _setup.nParticles));
     SAFE_CALL(cudaMalloc((void**)&_gpuparticles.particle_beta, sizeof(flt2) * _setup.nParticles));
     SAFE_CALL(cudaMalloc((void**)&_gpuparticles.particle_chiT, sizeof(flt2) * _setup.nParticles));
@@ -332,6 +366,7 @@ vc3_phys::KSNPSolver::KSNPSolver(cudaStream_t& stream, vc3_phys::setupParameters
     SAFE_CALL(cudaMalloc((void**)&_gpuparticles.particle_flag_boundaryHit, sizeof(bool) * _setup.nParticles));
     SAFE_CALL(cudaMalloc((void**)&_gpuparticles.particle_flag_targetHit, sizeof(int) * _setup.nParticles));
     SAFE_CALL(cudaMalloc((void**)&_gpuparticles.particle_flag_timedReset, sizeof(bool) * _setup.nParticles));
+    SAFE_CALL(cudaMalloc((void**)&_gpuparticles.particle_flag_wasResetToCenter, sizeof(bool) * _setup.nParticles));
     SAFE_CALL(cudaMalloc((void**)&_gpuparticles.particle_curandstate, sizeof(curandState) * _setup.nParticles));
     SAFE_CALL(cudaMalloc((void**)&_gpuparticles.particle_ID, sizeof(int) * _setup.nParticles));
     SAFE_CALL(cudaMalloc((void**)&_gpuparticles.particle_next_in_cell, sizeof(int) * _setup.nParticles));
@@ -353,6 +388,14 @@ vc3_phys::KSNPSolver::KSNPSolver(cudaStream_t& stream, vc3_phys::setupParameters
 #else
     SAFE_KERNEL_CALL(( __kernel_init_particles<<< Nblocks_init_particles, _threadsPerBlock, 0, stream >>>(__gpuparticles, _randseed)) );
 #endif
+    // Copy particle static properties from GPU to host
+    SAFE_CALL(cudaMemcpy(_cpu_particle_properties.particle_V0, _gpuparticles.particle_V0, sizeof(flt2) * _setup.nParticles, cudaMemcpyDeviceToHost));
+    SAFE_CALL(cudaMemcpy(_cpu_particle_properties.particle_V, _gpuparticles.particle_V, sizeof(flt2) * _setup.nParticles, cudaMemcpyDeviceToHost));
+    SAFE_CALL(cudaMemcpy(_cpu_particle_properties.particle_beta0, _gpuparticles.particle_beta0, sizeof(flt2)* _setup.nParticles, cudaMemcpyDeviceToHost));
+    SAFE_CALL(cudaMemcpy(_cpu_particle_properties.particle_chiT, _gpuparticles.particle_chiT, sizeof(flt2)* _setup.nParticles, cudaMemcpyDeviceToHost));
+    SAFE_CALL(cudaMemcpy(_cpu_particle_properties.particle_chiR, _gpuparticles.particle_chiR, sizeof(flt2)* _setup.nParticles, cudaMemcpyDeviceToHost));
+    SAFE_CALL(cudaMemcpy(_cpu_particle_properties.particle_c0, _gpuparticles.particle_c0, sizeof(flt2)* _setup.nParticles, cudaMemcpyDeviceToHost));
+    SAFE_CALL(cudaMemcpy(_cpu_particle_properties.particle_DR, _gpuparticles.particle_DR, sizeof(flt2)* _setup.nParticles, cudaMemcpyDeviceToHost));
     // Copy current state from GPU to the last state in current history on CPU
     // - it will make it the first pre-history state after first full history copy
     int initoffset = _currentGPUHistoryOffset * _setup.nParticles;
@@ -360,12 +403,18 @@ vc3_phys::KSNPSolver::KSNPSolver(cudaStream_t& stream, vc3_phys::setupParameters
         sizeof(vc3_cumath::planar::cuvector) * _setup.nParticles, cudaMemcpyDeviceToHost));
     SAFE_CALL(cudaMemcpy(_cpu_particles_stats.particle_angle_history + initoffset, _gpuparticles.particle_angle,
         sizeof(flt2) * _setup.nParticles, cudaMemcpyDeviceToHost));
+    SAFE_CALL(cudaMemcpy(_cpu_particles_stats.particle_V_history + initoffset, _gpuparticles.particle_V,
+        sizeof(flt2)* _setup.nParticles, cudaMemcpyDeviceToHost));
+    SAFE_CALL(cudaMemcpy(_cpu_particles_stats.particle_beta_history + initoffset, _gpuparticles.particle_beta,
+        sizeof(flt2)* _setup.nParticles, cudaMemcpyDeviceToHost));
     SAFE_CALL(cudaMemcpy(_cpu_particles_stats.particle_flag_boundaryHit_history + initoffset, _gpuparticles.particle_flag_boundaryHit,
         sizeof(bool) * _setup.nParticles, cudaMemcpyDeviceToHost));
     SAFE_CALL(cudaMemcpy(_cpu_particles_stats.particle_flag_targetHit_history + initoffset, _gpuparticles.particle_flag_targetHit,
         sizeof(int) * _setup.nParticles, cudaMemcpyDeviceToHost));
     SAFE_CALL(cudaMemcpy(_cpu_particles_stats.particle_flag_timedReset_history + initoffset, _gpuparticles.particle_flag_timedReset,
         sizeof(bool) * _setup.nParticles, cudaMemcpyDeviceToHost));
+    SAFE_CALL(cudaMemcpy(_cpu_particles_stats.particle_flag_wasResetToCenter_history + initoffset, _gpuparticles.particle_flag_wasResetToCenter,
+        sizeof(bool)* _setup.nParticles, cudaMemcpyDeviceToHost));
     // Allocate memory on GPU
 #ifdef DEBUG0
     std::cout << "\KSNPSolver::KSNPSolver() - allocating _gpuparticles " << _setup.nParticles << " - done\n";
@@ -395,9 +444,12 @@ vc3_phys::KSNPSolver::KSNPSolver(cudaStream_t& stream, vc3_phys::setupParameters
     SAFE_CALL(cudaMalloc((void**)&__gpuparticle_stats, sizeof(gpu_particle_stats)));
     SAFE_CALL(cudaMalloc((void**)&_gpuparticle_stats.particle_pos_history, sizeof(vc3_cumath::planar::cuvector) * _setup.nParticles * _setup.gpuHistoryLength));
     SAFE_CALL(cudaMalloc((void**)&_gpuparticle_stats.particle_angle_history, sizeof(flt2) * _setup.nParticles * _setup.gpuHistoryLength));
+    SAFE_CALL(cudaMalloc((void**)&_gpuparticle_stats.particle_V_history, sizeof(flt2) * _setup.nParticles * _setup.gpuHistoryLength));
+    SAFE_CALL(cudaMalloc((void**)&_gpuparticle_stats.particle_beta_history, sizeof(flt2) * _setup.nParticles * _setup.gpuHistoryLength));
     SAFE_CALL(cudaMalloc((void**)&_gpuparticle_stats.particle_flag_boundaryHit_history, sizeof(bool) * _setup.nParticles * _setup.gpuHistoryLength));
     SAFE_CALL(cudaMalloc((void**)&_gpuparticle_stats.particle_flag_targetHit_history, sizeof(int) * _setup.nParticles * _setup.gpuHistoryLength));
     SAFE_CALL(cudaMalloc((void**)&_gpuparticle_stats.particle_flag_timedReset_history, sizeof(bool) * _setup.nParticles * _setup.gpuHistoryLength));
+    SAFE_CALL(cudaMalloc((void**)&_gpuparticle_stats.particle_flag_wasResetToCenter_history, sizeof(bool) * _setup.nParticles * _setup.gpuHistoryLength));
     // Copy pointers to the device
     SAFE_CALL(cudaMemcpyAsync(__gpuparticle_stats, &_gpuparticle_stats, sizeof(gpu_particle_stats), cudaMemcpyHostToDevice, stream));
 
@@ -408,7 +460,9 @@ vc3_phys::KSNPSolver::KSNPSolver(cudaStream_t& stream, vc3_phys::setupParameters
 int vc3_phys::KSNPSolver::runOneStep(cudaStream_t& stream) noexcept
 {
 #ifdef DEBUG0
-    std::cout << " " << _currentStep;
+    int mydevice;
+    cudaGetDevice(&mydevice);
+    std::cout << " " << _currentStep << "@" << mydevice;
     std::cout.flush();
 #endif
 #ifdef DEBUG1
@@ -421,6 +475,16 @@ int vc3_phys::KSNPSolver::runOneStep(cudaStream_t& stream) noexcept
 #endif
     _solverTimer.start();
 #ifdef DEBUG0
+    std::cout << "S";
+    std::cout.flush();
+#endif
+#ifdef DEBUG1
+    std::cout << "KSNPSolver::runOneStep()::scenarios()\n";
+    std::cout.flush();
+#endif
+    err += scenarios(stream);
+    _timing.timeSolver_scenarios += _solverTimer.lap();
+#ifdef DEBUG0
     std::cout << "M";
     std::cout.flush();
 #endif
@@ -429,7 +493,7 @@ int vc3_phys::KSNPSolver::runOneStep(cudaStream_t& stream) noexcept
     std::cout.flush();
 #endif
     err += ppInteractions(stream);
-    _solverTimer.lap();
+    _timing.timeSolver_ppInteractions += _solverTimer.lap();
 #ifdef DEBUG0
     std::cout << "m";
     std::cout.flush();
@@ -579,6 +643,13 @@ void vc3_phys::KSNPSolver::getCurrentStatus(cudaStream_t& stream, vc3_phys::gpu_
 
 void vc3_phys::KSNPSolver::printGPUHistoryData(std::ostream& out) noexcept
 {
+#ifdef DEBUG0
+    int mydevice;
+    cudaGetDevice(&mydevice);
+    std::cout << "\nKSNPSolver::printGPUHistoryData() on GPU#" << mydevice << "\n";
+    std::cout.flush();
+#endif
+
     if (_currentGPUHistoryOffset != 0) return;
     for (int q = 0; q < _setup.nParticles; q++) out << "\tP" << q + 1 << "x\tP" << q + 1 << "y";
     out << "\n";
@@ -598,7 +669,9 @@ void vc3_phys::KSNPSolver::printGPUHistoryData(std::ostream& out) noexcept
 vc3_phys::KSNPSolver::~KSNPSolver()
 {
 #ifdef DEBUG0
-    std::cout << "KSNPSolver::~KSNPSolver()\n";
+    int mydevice;
+    cudaGetDevice(&mydevice);
+    std::cout << "\nKSNPSolver::~nKSNPSolver() on GPU#" << mydevice << "\n";
     std::cout.flush();
 #endif
     // 1. Free memory allocated on GPU
@@ -607,6 +680,7 @@ vc3_phys::KSNPSolver::~KSNPSolver()
 
     SAFE_CALL(cudaFree(__gputargets));
     SAFE_CALL(cudaFree(_gputargets.target_active));
+    SAFE_CALL(cudaFree(_gputargets.target_deactivated));
     SAFE_CALL(cudaFree(_gputargets.target_pos));
     SAFE_CALL(cudaFree(_gputargets.target_radius));
     SAFE_CALL(cudaFree(_gputargets.target_radius2));
@@ -617,6 +691,7 @@ vc3_phys::KSNPSolver::~KSNPSolver()
     SAFE_CALL(cudaFree(_gputargets.target_terminationTime));
     SAFE_CALL(cudaFree(_gputargets.target_resetType));
     SAFE_CALL(cudaFree(_gputargets.target_betaMult));
+    SAFE_CALL(cudaFree(_gputargets.target_V));
     SAFE_CALL(cudaFree(_gputargets.target_resetSRtime));
     SAFE_CALL(cudaFree(_gputargets.target_homeType));
 
@@ -634,6 +709,8 @@ vc3_phys::KSNPSolver::~KSNPSolver()
     SAFE_CALL(cudaFree(_gpuparticles.particle_GSC));
     SAFE_CALL(cudaFree(_gpuparticles.particle_PPforce));
     SAFE_CALL(cudaFree(_gpuparticles.particle_PPforceSpatialHashing));
+    SAFE_CALL(cudaFree(_gpuparticles.particle_V0));
+    SAFE_CALL(cudaFree(_gpuparticles.particle_V));
     SAFE_CALL(cudaFree(_gpuparticles.particle_beta0));
     SAFE_CALL(cudaFree(_gpuparticles.particle_beta));
     SAFE_CALL(cudaFree(_gpuparticles.particle_chiT));
@@ -644,6 +721,7 @@ vc3_phys::KSNPSolver::~KSNPSolver()
     SAFE_CALL(cudaFree(_gpuparticles.particle_flag_boundaryHit));
     SAFE_CALL(cudaFree(_gpuparticles.particle_flag_targetHit));
     SAFE_CALL(cudaFree(_gpuparticles.particle_flag_timedReset));
+    SAFE_CALL(cudaFree(_gpuparticles.particle_flag_wasResetToCenter));
     SAFE_CALL(cudaFree(_gpuparticles.particle_curandstate));
     SAFE_CALL(cudaFree(_gpuparticles.particle_ID));
     SAFE_CALL(cudaFree(_gpuparticles.particle_next_in_cell));
@@ -655,13 +733,17 @@ vc3_phys::KSNPSolver::~KSNPSolver()
     SAFE_CALL(cudaFree(__gpuparticle_stats));
     SAFE_CALL(cudaFree(_gpuparticle_stats.particle_pos_history));
     SAFE_CALL(cudaFree(_gpuparticle_stats.particle_angle_history));
+    SAFE_CALL(cudaFree(_gpuparticle_stats.particle_V_history));
+    SAFE_CALL(cudaFree(_gpuparticle_stats.particle_beta_history));
     SAFE_CALL(cudaFree(_gpuparticle_stats.particle_flag_boundaryHit_history));
     SAFE_CALL(cudaFree(_gpuparticle_stats.particle_flag_targetHit_history));
     SAFE_CALL(cudaFree(_gpuparticle_stats.particle_flag_timedReset_history));
+    SAFE_CALL(cudaFree(_gpuparticle_stats.particle_flag_wasResetToCenter_history));
 
     // 2. Free memory allocated on host
     // =========================================
     delete[] _cputargets.target_active;
+    delete[] _cputargets.target_deactivated;
     delete[] _cputargets.target_pos;
     delete[] _cputargets.target_radius;
     delete[] _cputargets.target_radius2;
@@ -672,13 +754,24 @@ vc3_phys::KSNPSolver::~KSNPSolver()
     delete[] _cputargets.target_terminationTime;
     delete[] _cputargets.target_resetType;
     delete[] _cputargets.target_betaMult;
+    delete[] _cputargets.target_V;
     delete[] _cputargets.target_resetSRtime;
     delete[] _cputargets.target_homeType;
+    SAFE_CALL(cudaFreeHost(_cpu_particle_properties.particle_V0));
+    SAFE_CALL(cudaFreeHost(_cpu_particle_properties.particle_V));
+    SAFE_CALL(cudaFreeHost(_cpu_particle_properties.particle_beta0));
+    SAFE_CALL(cudaFreeHost(_cpu_particle_properties.particle_chiT));
+    SAFE_CALL(cudaFreeHost(_cpu_particle_properties.particle_chiR));
+    SAFE_CALL(cudaFreeHost(_cpu_particle_properties.particle_c0));
+    SAFE_CALL(cudaFreeHost(_cpu_particle_properties.particle_DR));
     SAFE_CALL(cudaFreeHost(_cpu_particles_stats.particle_pos_history));
     SAFE_CALL(cudaFreeHost(_cpu_particles_stats.particle_angle_history));
+    SAFE_CALL(cudaFreeHost(_cpu_particles_stats.particle_V_history));
+    SAFE_CALL(cudaFreeHost(_cpu_particles_stats.particle_beta_history));
     SAFE_CALL(cudaFreeHost(_cpu_particles_stats.particle_flag_boundaryHit_history));
     SAFE_CALL(cudaFreeHost(_cpu_particles_stats.particle_flag_targetHit_history));
     SAFE_CALL(cudaFreeHost(_cpu_particles_stats.particle_flag_timedReset_history));
+    SAFE_CALL(cudaFreeHost(_cpu_particles_stats.particle_flag_wasResetToCenter_history));
     SAFE_CALL(cudaFreeHost(particle_PPforce));
     SAFE_CALL(cudaFreeHost(particle_PPforceSpatialHashing));
 
@@ -690,6 +783,12 @@ vc3_phys::KSNPSolver::~KSNPSolver()
 
 int vc3_phys::KSNPSolver::generate_targets() noexcept
 {
+#ifdef DEBUG0
+    int mydevice;
+    cudaGetDevice(&mydevice);
+    std::cout << "\nKSNPSolver::generate_targets() on GPU#" << mydevice << "\n";
+    std::cout.flush();
+#endif
     std::cout << "\nKSNPSolver::generate_targets()\n";
     // Check number of targets to be generated
     int nt = _setup.targetList.size();
@@ -702,6 +801,7 @@ int vc3_phys::KSNPSolver::generate_targets() noexcept
 
     // Allocate CPU memory
     _cputargets.target_active = new bool[nt];
+    _cputargets.target_deactivated = new bool[nt];
     _cputargets.target_pos = new vc3_cumath::planar::cuvector[nt];
     _cputargets.target_radius = new flt2[nt];
     _cputargets.target_radius2 = new flt2[nt];
@@ -712,6 +812,7 @@ int vc3_phys::KSNPSolver::generate_targets() noexcept
     _cputargets.target_terminationTime = new flt2[nt];
     _cputargets.target_resetType = new int[nt];
     _cputargets.target_betaMult = new flt2[nt];
+    _cputargets.target_V = new flt2[nt];
     _cputargets.target_resetSRtime = new int[nt];
     _cputargets.target_homeType = new int[nt];
     std::cout << "KSNPSolver::generate_targets: Memory allocated\n";
@@ -725,7 +826,11 @@ int vc3_phys::KSNPSolver::generate_targets() noexcept
         for (int t = 0; t < nt; t++)
         {
             std::cout << "KSNPSolver::generate_targets: generating target " << t + 1 << " / " << nt << "\n";
-            flt2 d = _setup.targetList[t].targetDistanceMin + rng.segment_generate() * (_setup.targetList[t].targetDistanceMax - _setup.targetList[t].targetDistanceMin);
+            //flt2 d = _setup.targetList[t].targetDistanceMin + rng.segment_generate() * (_setup.targetList[t].targetDistanceMax - _setup.targetList[t].targetDistanceMin);
+            flt2 r_min_sq = _setup.targetList[t].targetDistanceMin * _setup.targetList[t].targetDistanceMin;
+            flt2 r_max_sq = _setup.targetList[t].targetDistanceMax * _setup.targetList[t].targetDistanceMax;
+            flt2 d2 = r_min_sq + rng.segment_generate() * (r_max_sq - r_min_sq);
+            flt2 d = vc3_math::msqrt(d2);
             flt2 a = _setup.targetList[t].targetAngleMin + rng.segment_generate() * (_setup.targetList[t].targetAngleMax - _setup.targetList[t].targetAngleMin);
             _cputargets.target_pos[t].x = _setup.boxSize * 0.50 + d * cos(a / 180.00 * vc3_math::Pi);
             _cputargets.target_pos[t].y = _setup.boxSize * 0.50 + d * sin(a / 180.00 * vc3_math::Pi);
@@ -742,14 +847,17 @@ int vc3_phys::KSNPSolver::generate_targets() noexcept
             _cputargets.target_terminationTime[t] = _setup.targetList[t].targetTerminateTime;
             _cputargets.target_resetType[t] = _setup.targetList[t].targetResetType;
             _cputargets.target_betaMult[t] = _setup.targetList[t].betaTargetMultMin + rng.segment_generate() * (_setup.targetList[t].betaTargetMultMax - _setup.targetList[t].betaTargetMultMin);
+            _cputargets.target_V[t] = _setup.targetList[t].VTargetMin + rng.segment_generate() * (_setup.targetList[t].VTargetMax - _setup.targetList[t].VTargetMin);
             _cputargets.target_resetSRtime[t] = _setup.targetList[t].targetResetSRtime;
             _cputargets.target_homeType[t] = _setup.targetList[t].targetHomePotential;
 
             if (_cputargets.target_appearTime[t] <= 0.00) _cputargets.target_active[t] = true;
             else _cputargets.target_active[t] = false;
+            _cputargets.target_deactivated[t] = false;
 
             std::cout << "KSNPSolver::generate_targets: target " << t + 1 << " / " << nt 
-                << " -- pos.x="<< _cputargets.target_pos[t].x << ", pos.y=" << _cputargets.target_pos[t].y
+                << " -- appearTime="<< _cputargets.target_appearTime[t] << ", terminationTime=" << _cputargets.target_terminationTime[t]
+                << ", pos.x="<< _cputargets.target_pos[t].x << ", pos.y=" << _cputargets.target_pos[t].y
                 << ", r="<< _cputargets.target_radius[t] << ", r2=" << _cputargets.target_radius2[t]
                 << ", RT="<< _cputargets.target_resetType[t] << ", active=" << _cputargets.target_active[t]
                 << "\n";
@@ -771,9 +879,11 @@ int vc3_phys::KSNPSolver::generate_targets() noexcept
         _cputargets.target_terminationTime[0] = -1.00;
         _cputargets.target_resetType[0] = 0;
         _cputargets.target_betaMult[0] = 0.00;
+        _cputargets.target_V[0] = -1.00;
         _cputargets.target_resetSRtime[0] = 0;
         _cputargets.target_homeType[0] = 0;
         _cputargets.target_active[0] = false;
+        _cputargets.target_deactivated[0] = false;
     }
 
     std::cout << "KSNPSolver::generate_targets: done\n";
@@ -781,9 +891,93 @@ int vc3_phys::KSNPSolver::generate_targets() noexcept
     return 0;
 }
 
+int vc3_phys::KSNPSolver::scenarios(cudaStream_t& stream) noexcept
+{
+    /** Apply particle scenarios
+    **/
+    for (int ns = 0; ns < _setup.scenarioParticlesList.size(); ns++)
+    {
+        for (int ts = 0; ts < _setup.scenarioParticlesList[ns].timesteppoints.size(); ts++)
+        {
+            if (_currentStep == _setup.scenarioParticlesList[ns].timesteppoints[ts])
+            {
+                flt2 setvalue = _setup.scenarioParticlesList[ns].values[ts];
+                dim3 Nblocks_scenarioParticles((_setup.nParticles + _threadsPerBlock - 1) / _threadsPerBlock);
+
+                if (_setup.scenarioParticlesList[ns].parameter == 1)
+                {
+                    SAFE_KERNEL_CALL((__kernel_scenarioParticles_V0 << < Nblocks_scenarioParticles, _threadsPerBlock, 0, stream >> >
+                        (__gpuvariables, __gpuparticles, setvalue)));
+                    SAFE_CALL(cudaMemcpy(_cpu_particle_properties.particle_V0, _gpuparticles.particle_V0, sizeof(flt2) * _setup.nParticles, cudaMemcpyDeviceToHost));
+                    std::cout << "SCENARIO " << ns << " point " << ts << " at timestep " << _currentStep << " sets particle_V0 to " << setvalue << "\n";
+                }
+                else if (_setup.scenarioParticlesList[ns].parameter == 2)
+                {
+                    SAFE_KERNEL_CALL((__kernel_scenarioParticles_beta0 << < Nblocks_scenarioParticles, _threadsPerBlock, 0, stream >> >
+                        (__gpuvariables, __gpuparticles, setvalue)));
+                    SAFE_CALL(cudaMemcpy(_cpu_particle_properties.particle_beta0, _gpuparticles.particle_beta0, sizeof(flt2) * _setup.nParticles, cudaMemcpyDeviceToHost));
+                    std::cout << "SCENARIO " << ns << " point " << ts << " at timestep " << _currentStep << " sets particle_beta0 to " << setvalue << "\n";
+                }
+                else if (_setup.scenarioParticlesList[ns].parameter == 3)
+                {
+                    SAFE_KERNEL_CALL((__kernel_scenarioParticles_chiT << < Nblocks_scenarioParticles, _threadsPerBlock, 0, stream >> >
+                        (__gpuvariables, __gpuparticles, setvalue)));
+                    SAFE_CALL(cudaMemcpy(_cpu_particle_properties.particle_chiT, _gpuparticles.particle_chiT, sizeof(flt2) * _setup.nParticles, cudaMemcpyDeviceToHost));
+                    std::cout << "SCENARIO " << ns << " point " << ts << " at timestep " << _currentStep << " sets particle_chiT to " << setvalue << "\n";
+                }
+                else if (_setup.scenarioParticlesList[ns].parameter == 4)
+                {
+                    SAFE_KERNEL_CALL((__kernel_scenarioParticles_chiR << < Nblocks_scenarioParticles, _threadsPerBlock, 0, stream >> >
+                        (__gpuvariables, __gpuparticles, setvalue)));
+                    SAFE_CALL(cudaMemcpy(_cpu_particle_properties.particle_chiR, _gpuparticles.particle_chiR, sizeof(flt2) * _setup.nParticles, cudaMemcpyDeviceToHost));
+                    std::cout << "SCENARIO " << ns << " point " << ts << " at timestep " << _currentStep << " sets particle_chiR to " << setvalue << "\n";
+                }
+                else if (_setup.scenarioParticlesList[ns].parameter == 5)
+                {
+                    SAFE_KERNEL_CALL((__kernel_scenarioParticles_c0 << < Nblocks_scenarioParticles, _threadsPerBlock, 0, stream >> >
+                        (__gpuvariables, __gpuparticles, setvalue)));
+                    SAFE_CALL(cudaMemcpy(_cpu_particle_properties.particle_c0, _gpuparticles.particle_c0, sizeof(flt2) * _setup.nParticles, cudaMemcpyDeviceToHost));
+                    std::cout << "SCENARIO " << ns << " point " << ts << " at timestep " << _currentStep << " sets particle_c0 to " << setvalue << "\n";
+                }
+                else if (_setup.scenarioParticlesList[ns].parameter == 6)
+                {
+                    SAFE_KERNEL_CALL((__kernel_scenarioParticles_DR << < Nblocks_scenarioParticles, _threadsPerBlock, 0, stream >> >
+                        (__gpuvariables, __gpuparticles, setvalue)));
+                    SAFE_CALL(cudaMemcpy(_cpu_particle_properties.particle_DR, _gpuparticles.particle_DR, sizeof(flt2) * _setup.nParticles, cudaMemcpyDeviceToHost));
+                    std::cout << "SCENARIO " << ns << " point " << ts << " at timestep " << _currentStep << " sets particle_DR to " << setvalue << "\n";
+                }
+                
+            } // if (_currentStep == _setup.scenarioParticlesList[sp].timesteppoints[ts])
+        } // for (int ts = 0; ts < _setup.scenarioParticlesList[sp].timesteppoints.size(); ts++)
+    }
+    return 0;
+}
+
 int vc3_phys::KSNPSolver::ppInteractions(cudaStream_t& stream) noexcept
 {
+#ifdef NOATOMIC
+    if (_setup.PPepsilon > 0.00)
+    {
+        // Bypass Spatial Hashing and launch O(N^2) deterministic solver
+        dim3 Nblocks_PPforcesN2((_setup.nParticles + _threadsPerBlock - 1) / _threadsPerBlock);
+        dim3 blockDim_PPforcesN2(_threadsPerBlock);
 
+#ifdef KERNELTIME
+        kernelTimerAsync::getInstance().record("__kernel_PPforcesN2_NOATOMIC",
+            __kernel_PPforcesN2_NOATOMIC, Nblocks_PPforcesN2, blockDim_PPforcesN2, 0, stream,
+            __gpuvariables, __gpuparticles);
+#else
+        if (_setup.boundaryType == 0 || _setup.boundaryType == 1) // no PBC
+        {
+            SAFE_KERNEL_CALL((__kernel_PPforcesN2_NOATOMIC <<< Nblocks_PPforcesN2, _threadsPerBlock, 0, stream >>> (__gpuvariables, __gpuparticles)));
+        }
+        else if (_setup.boundaryType == 2) // PBC
+        {
+            SAFE_KERNEL_CALL((__kernel_PPforcesN2_PBC_NOATOMIC <<< Nblocks_PPforcesN2, _threadsPerBlock, 0, stream >>> (__gpuvariables, __gpuparticles)));
+        }
+#endif
+    }
+#else
     /** Spatial hashing calculations, ~N
     * Parallel execution
         LIMITED TO 65535 PARTICLES
@@ -808,10 +1002,17 @@ int vc3_phys::KSNPSolver::ppInteractions(cudaStream_t& stream) noexcept
             __kernel_PPforcesHashGrid, Nblocks_PPforcesSH, blockDim_PPforcesSH, 0, stream,
             __gpuparticles, __gpuppinteractions);
 #else
-        SAFE_KERNEL_CALL(( __kernel_PPforcesHashGrid<<< Nblocks_PPforcesSH, _threadsPerBlock, 0, stream >>>(__gpuparticles, __gpuppinteractions) ));
+        if (_setup.boundaryType == 0 || _setup.boundaryType == 1) // no PBC
+        {
+            SAFE_KERNEL_CALL((__kernel_PPforcesHashGrid << < Nblocks_PPforcesSH, _threadsPerBlock, 0, stream >> > (__gpuparticles, __gpuppinteractions)));
+        }
+        else if (_setup.boundaryType == 2) // PBC
+        {
+            SAFE_KERNEL_CALL((__kernel_PPforcesHashGrid_PBC << < Nblocks_PPforcesSH, _threadsPerBlock, 0, stream >> > (__gpuparticles, __gpuppinteractions)));
+        }
 #endif
     }
-
+#endif
     return 0;
 }
 
@@ -826,14 +1027,49 @@ int vc3_phys::KSNPSolver::moveParticles(cudaStream_t& stream) noexcept
         __kernel_moveParticles, Nblocks_moveParticles, blockDim_moveParticles, 0, stream,
         __gpuvariables, __gputargets, __gpumatrixes, __gpuparticles);
 #else
-    SAFE_KERNEL_CALL((__kernel_moveParticles << < Nblocks_moveParticles, _threadsPerBlock, 0, stream >> >
-        (__gpuvariables, __gputargets, __gpumatrixes, __gpuparticles) ));
+    if (_setup.boundaryType == 0 || _setup.boundaryType == 1) // no PBC
+    {
+        SAFE_KERNEL_CALL((__kernel_moveParticles << < Nblocks_moveParticles, _threadsPerBlock, 0, stream >> >
+            (__gpuvariables, __gputargets, __gpumatrixes, __gpuparticles)));
+    }
+    else if (_setup.boundaryType == 2) // PBC
+    {
+        SAFE_KERNEL_CALL((__kernel_moveParticles_PBC << < Nblocks_moveParticles, _threadsPerBlock, 0, stream >> >
+            (__gpuvariables, __gputargets, __gpumatrixes, __gpuparticles)));
+    }
+
 #endif
     return 0;
 }
 
 int vc3_phys::KSNPSolver::leaveScentMarks(cudaStream_t& stream) noexcept
 {
+#ifdef NOATOMIC
+    // Update to 2D Grid Execution for Deterministic Gather Mode
+    dim3 blockDim_leaveScentMarks(16, 16);
+    dim3 Nblocks_leaveScentMarks(
+        (_setup.latticeSize + blockDim_leaveScentMarks.x - 1) / blockDim_leaveScentMarks.x,
+        (_setup.latticeSize + blockDim_leaveScentMarks.y - 1) / blockDim_leaveScentMarks.y
+    );
+
+#ifdef KERNELTIME
+    kernelTimerAsync::getInstance().record("__kernel_leaveScentMarks_NOATOMIC",
+        __kernel_leaveScentMarks_NOATOMIC, Nblocks_leaveScentMarks, blockDim_leaveScentMarks, 0, stream,
+        __gpuvariables, __gpumatrixes, __gpuparticles);
+#else
+    if (_setup.boundaryType == 0 || _setup.boundaryType == 1) // no PBC
+    {
+        SAFE_KERNEL_CALL((__kernel_leaveScentMarks_NOATOMIC <<< Nblocks_leaveScentMarks, blockDim_leaveScentMarks, 0, stream >>>
+            (__gpuvariables, __gpumatrixes, __gpuparticles)));
+    }
+    else if (_setup.boundaryType == 2) // PBC
+    {
+        SAFE_KERNEL_CALL((__kernel_leaveScentMarks_PBC_NOATOMIC <<< Nblocks_leaveScentMarks, blockDim_leaveScentMarks, 0, stream >>>
+            (__gpuvariables, __gpumatrixes, __gpuparticles)));
+    }
+#endif
+
+#else
     /* Parallel execution with atomicAdd 
     LIMITED TO 65535 PARTICLES */
     int windowSize2 = (2 * _SCmark_dl_cutoff + 1) * (2 * _SCmark_dl_cutoff + 1);
@@ -844,8 +1080,17 @@ int vc3_phys::KSNPSolver::leaveScentMarks(cudaStream_t& stream) noexcept
         __kernel_leaveScentMarks, Nblocks_leaveScentMarks, blockDim_leaveScentMarks, 0, stream,
         __gpuvariables, __gpumatrixes, __gpuparticles);
 #else
-    SAFE_KERNEL_CALL(( __kernel_leaveScentMarks<<< Nblocks_leaveScentMarks, _threadsPerBlock, 0, stream >>>
-        (__gpuvariables, __gpumatrixes, __gpuparticles) ));  
+    if (_setup.boundaryType == 0 || _setup.boundaryType == 1) // no PBC
+    {
+        SAFE_KERNEL_CALL((__kernel_leaveScentMarks << < Nblocks_leaveScentMarks, _threadsPerBlock, 0, stream >> >
+            (__gpuvariables, __gpumatrixes, __gpuparticles)));
+    }
+    else if (_setup.boundaryType == 2) // PBC
+    {
+        SAFE_KERNEL_CALL((__kernel_leaveScentMarks_PBC << < Nblocks_leaveScentMarks, _threadsPerBlock, 0, stream >> >
+            (__gpuvariables, __gpumatrixes, __gpuparticles)));
+    }
+#endif
 #endif
 
     return 0;
@@ -922,6 +1167,12 @@ int vc3_phys::KSNPSolver::storeHistory(cudaStream_t& stream) noexcept
         _gpuparticle_stats.particle_angle_history + offset, _gpuparticles.particle_angle,
         _setup.nParticles * sizeof(flt2), cudaMemcpyDeviceToDevice, stream));
     SAFE_CALL(cudaMemcpyAsync(
+        _gpuparticle_stats.particle_V_history + offset, _gpuparticles.particle_V,
+        _setup.nParticles * sizeof(flt2), cudaMemcpyDeviceToDevice, stream));
+    SAFE_CALL(cudaMemcpyAsync(
+        _gpuparticle_stats.particle_beta_history + offset, _gpuparticles.particle_beta,
+        _setup.nParticles * sizeof(flt2), cudaMemcpyDeviceToDevice, stream));
+    SAFE_CALL(cudaMemcpyAsync(
         _gpuparticle_stats.particle_flag_boundaryHit_history + offset, _gpuparticles.particle_flag_boundaryHit,
         _setup.nParticles * sizeof(bool), cudaMemcpyDeviceToDevice, stream));
     SAFE_CALL(cudaMemcpyAsync(
@@ -929,6 +1180,9 @@ int vc3_phys::KSNPSolver::storeHistory(cudaStream_t& stream) noexcept
         _setup.nParticles * sizeof(int), cudaMemcpyDeviceToDevice, stream));
     SAFE_CALL(cudaMemcpyAsync(
         _gpuparticle_stats.particle_flag_timedReset_history + offset, _gpuparticles.particle_flag_timedReset,
+        _setup.nParticles * sizeof(bool), cudaMemcpyDeviceToDevice, stream));
+    SAFE_CALL(cudaMemcpyAsync(
+        _gpuparticle_stats.particle_flag_wasResetToCenter_history + offset, _gpuparticles.particle_flag_wasResetToCenter,
         _setup.nParticles * sizeof(bool), cudaMemcpyDeviceToDevice, stream));
     // Increment history offset
     _currentGPUHistoryOffset++;
@@ -940,9 +1194,12 @@ int vc3_phys::KSNPSolver::storeHistory(cudaStream_t& stream) noexcept
             int offset = _currentGPUHistoryOffset * _setup.nParticles + w;
             _cpu_particles_stats.particle_pos_history[w] = _cpu_particles_stats.particle_pos_history[offset];
             _cpu_particles_stats.particle_angle_history[w] = _cpu_particles_stats.particle_angle_history[offset];
+            _cpu_particles_stats.particle_V_history[w] = _cpu_particles_stats.particle_V_history[offset];
+            _cpu_particles_stats.particle_beta_history[w] = _cpu_particles_stats.particle_beta_history[offset];
             _cpu_particles_stats.particle_flag_boundaryHit_history[w] = _cpu_particles_stats.particle_flag_boundaryHit_history[offset];
             _cpu_particles_stats.particle_flag_targetHit_history[w] = _cpu_particles_stats.particle_flag_targetHit_history[offset];
             _cpu_particles_stats.particle_flag_timedReset_history[w] = _cpu_particles_stats.particle_flag_timedReset_history[offset];
+            _cpu_particles_stats.particle_flag_wasResetToCenter_history[w] = _cpu_particles_stats.particle_flag_wasResetToCenter_history[offset];
         }
         // Copy new history from GPU to CPU
         /*std::cout << "\nKSNPSolver::storeHistory - COPY: _currentGPUHistoryOffset = " << _currentGPUHistoryOffset
@@ -954,11 +1211,17 @@ int vc3_phys::KSNPSolver::storeHistory(cudaStream_t& stream) noexcept
             sizeof(vc3_cumath::planar::cuvector) * _setup.nParticles * _setup.gpuHistoryLength, cudaMemcpyDeviceToHost, stream));
         SAFE_CALL(cudaMemcpyAsync(_cpu_particles_stats.particle_angle_history + _setup.nParticles, _gpuparticle_stats.particle_angle_history,
             sizeof(flt2) * _setup.nParticles * _setup.gpuHistoryLength, cudaMemcpyDeviceToHost, stream));
+        SAFE_CALL(cudaMemcpyAsync(_cpu_particles_stats.particle_V_history + _setup.nParticles, _gpuparticle_stats.particle_V_history,
+            sizeof(flt2) * _setup.nParticles * _setup.gpuHistoryLength, cudaMemcpyDeviceToHost, stream));
+        SAFE_CALL(cudaMemcpyAsync(_cpu_particles_stats.particle_beta_history + _setup.nParticles, _gpuparticle_stats.particle_beta_history,
+            sizeof(flt2) * _setup.nParticles * _setup.gpuHistoryLength, cudaMemcpyDeviceToHost, stream));
         SAFE_CALL(cudaMemcpyAsync(_cpu_particles_stats.particle_flag_boundaryHit_history + _setup.nParticles, _gpuparticle_stats.particle_flag_boundaryHit_history,
             sizeof(bool) * _setup.nParticles * _setup.gpuHistoryLength, cudaMemcpyDeviceToHost, stream));
         SAFE_CALL(cudaMemcpyAsync(_cpu_particles_stats.particle_flag_targetHit_history + _setup.nParticles, _gpuparticle_stats.particle_flag_targetHit_history,
             sizeof(int) * _setup.nParticles * _setup.gpuHistoryLength, cudaMemcpyDeviceToHost, stream));
         SAFE_CALL(cudaMemcpyAsync(_cpu_particles_stats.particle_flag_timedReset_history + _setup.nParticles, _gpuparticle_stats.particle_flag_timedReset_history,
+            sizeof(bool) * _setup.nParticles * _setup.gpuHistoryLength, cudaMemcpyDeviceToHost, stream));
+        SAFE_CALL(cudaMemcpyAsync(_cpu_particles_stats.particle_flag_wasResetToCenter_history + _setup.nParticles, _gpuparticle_stats.particle_flag_wasResetToCenter_history,
             sizeof(bool) * _setup.nParticles * _setup.gpuHistoryLength, cudaMemcpyDeviceToHost, stream));
         _currentGPUHistoryOffset = 0;
 

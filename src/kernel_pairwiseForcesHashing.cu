@@ -102,5 +102,80 @@ __global__ void __kernel_PPforcesHashGrid(
     gpuparticles->particle_PPforceSpatialHashing[poffset] = force;
 }
 
+/** Device kernel (PBC Version)
+    Calculates pairwise DPD forces using spatial hashing with Periodic Boundary Conditions.
+    Changes:
+    1. Neighbor cell indices wrap around the grid.
+    2. Distance vectors use Minimum Image Convention (MIC).
+**/
+__global__ void __kernel_PPforcesHashGrid_PBC(
+    vc3_phys::gpu_particles* __restrict__ gpuparticles,
+    vc3_phys::gpu_ppinteractions* __restrict__ gpuppinteractions)
+{
+    const int poffset = blockIdx.x * blockDim.x + threadIdx.x;
+    if (poffset >= __gpusetup_variables.nParticles) return;
+
+    vc3_cumath::planar::cuvector force(0.0, 0.0);
+    const vc3_cumath::planar::cuvector p_pos = gpuparticles->particle_pos[poffset];
+    const int p_cell_x = gpuparticles->particle_cell_coord[poffset].x;
+    const int p_cell_y = gpuparticles->particle_cell_coord[poffset].y;
+
+    // Loop through the 9 neighboring cells
+    for (int dy = -1; dy <= 1; ++dy)
+    {
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            int neighbor_cell_x = p_cell_x + dx;
+            int neighbor_cell_y = p_cell_y + dy;
+
+            // MODIFICATION FOR PBC:
+            // Wrap neighbor indices instead of skipping if out of bounds.
+            if (neighbor_cell_x < 0) neighbor_cell_x += __gpuprecomputes.PPgrid_width;
+            else if (neighbor_cell_x >= __gpuprecomputes.PPgrid_width) neighbor_cell_x -= __gpuprecomputes.PPgrid_width;
+            if (neighbor_cell_y < 0) neighbor_cell_y += __gpuprecomputes.PPgrid_width;
+            else if (neighbor_cell_y >= __gpuprecomputes.PPgrid_width) neighbor_cell_y -= __gpuprecomputes.PPgrid_width;
+
+            unsigned int hash = ((unsigned int)neighbor_cell_x * 73856093u) ^ ((unsigned int)neighbor_cell_y * 19349663u);
+            hash &= (__gpuprecomputes.PPhash_table_size - 1);
+
+            int j = gpuppinteractions->grid_cell_heads[hash];
+            while (j != -1)
+            {
+                // HASH COLLISION RESOLUTION:
+                // Check if particle 'j' is actually in the correct neighbor cell.
+                if (gpuparticles->particle_cell_coord[j].x == neighbor_cell_x &&
+                    gpuparticles->particle_cell_coord[j].y == neighbor_cell_y)
+                {
+                    if (poffset != j)
+                    {
+                        vc3_cumath::planar::cuvector dr = p_pos - gpuparticles->particle_pos[j];
+
+                        // MODIFICATION FOR PBC:
+                        // Apply Minimum Image Convention (MIC) to the distance vector
+                        if (dr.x > __gpuprecomputes.halfBox) dr.x -= __gpusetup_variables.boxSize;
+                        else if (dr.x < -__gpuprecomputes.halfBox) dr.x += __gpusetup_variables.boxSize;
+                        if (dr.y > __gpuprecomputes.halfBox) dr.y -= __gpusetup_variables.boxSize;
+                        else if (dr.y < -__gpuprecomputes.halfBox) dr.y += __gpusetup_variables.boxSize;
+                        const flt2 dr2 = dr.length2();
+
+                        if (dr2 < __gpuprecomputes.PPcutoff2 && dr2 > 1e-20)
+                        {
+                            // Use the fast reciprocal square root intrinsic
+                            const flt2 inv_r = rsqrtf(dr2);
+                            const flt2 r = dr2 * inv_r;
+                            const flt2 F = __gpusetup_variables.PPepsilon * (1.00 - r / __gpusetup_variables.PPsigma);
+                            force += (F * inv_r) * dr;
+                        }
+                    }
+                }
+                // Move to the next particle in the list
+                j = gpuparticles->particle_next_in_cell[j];
+            }
+        }
+    }
+
+    gpuparticles->particle_PPforceSpatialHashing[poffset] = force;
+}
+
 
 #endif // VC3_PHYS_KSNP_KERNELS_PPSPATIALHASHING

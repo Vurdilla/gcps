@@ -1,4 +1,84 @@
-# Important: ***BIG UPDATE COMING IN BEGINNING OF JULY***
+# BIG UPDATE TO VERSION 7.10 IS HERE***
+
+## New features
+
+### Particles:
+
+**Additional mechanics**
+The particle velocity now is not fixed to the single value V0 for all the simulation time. Each particle now has the default velocity V0, and it's current velocity equals to V0 by default, but it can be affected by events during the simulations - same as beta. In the same manner, Searcher->VDecayTime in setup determines the characteristic time of exponential relaxation of the current velocity of each particle to it's V0.
+
+**Population of particles**
+Before, all the particles were identical in their parameters (velocity, rotational diffusion, chemosensitivity, chemosecretion). Now, you still can set a single value as before. And in addition, you can assign a distribution of values for the following parameters:
+- default velocity V0 (by Searcher->V0_distr)
+- rotational diffusion coefficient (by Searcher->rotationalDiffusion_distr)
+- default chemosecretion beta0 (by Searcher->beta0_distr)
+- default rotational and translational chemosensitivities (by Searcher->chiRot_distr and Searcher->chiTrans_distr)
+- chemosensitivity noise level (by Searcher->SC0_distr)
+
+Each distribution can be one of the following types (in Searcher section of the setup):
+- single value (distr = 0)
+- bimodal (distr = 1)
+- uniform (distr = 2)
+- log-uniform (distr = 3)
+- gaussian (distr = 4)
+- log-gaussian (distr = 5)
+
+Then the parameters of the distributions are determined by the the following additional parameter in Searcher section of the setup:
+min, max, bias, mean, sigma
+For example, for V0 distribution is will be V0_min, V0_max, V0_bias, V0_mean, V0_sigma. The meaning of each parameter is defined by distribution type, check the generator code `kernel_init.cu`.
+
+### System geometry:
+**Periodic boundary conditions are available now**
+You can choose between three system geometries now (via System->boundaryType):
+- circle (boundaryType = 0)
+- square (boundaryType = 1)
+- square with periodic boundary conditions (boundaryType = 2)
+
+In addition to that, you can determine where the particles will start at time 0 (via System->initialParticlePos):
+- center of arena (initialParticlePos = 0)
+- uniform distribution across arena area (initialParticlePos = 1)
+
+### Time reset
+In special cases, I needed to reset all the particles at once (globally) in the middle of simulations. For this, the parameter TimedReset->globalResetTime was introduced, with options:
+- no global resetting (globalResetTime = -1)
+- global resetting at a fixed time t (globalResetTime = t)
+Note that the globalResetTime value is in simulation time units, not timesteps.
+
+### Targets:
+Now target hit can affect particles velocity in addition to beta (via Boundary->VBoundary and Boundary->VBoundary in setup).
+
+Now several types of particle reactions to a target hit are supported (via TargetX->targetResetType in setup):
+- particle position to the center + random direction
+- particle  direction to the center + one timestep towards center
+- particle reverse direction + one timestep backward
+- permeatable target, replacing particles velocity and beta with targets values while the particle is inside the target
+
+### Boundary:
+Now boundary hit can affect particles velocity in addition to beta (via Target->VTargetMin and Target->VTargetMax in setup).
+
+### Scenarios added:
+Scenarios are the global changes independent on the current particle state, that you can imply in your simulations. Simulation can contain multiple scenarios at once (or no scenarios at all). In each scenario, you chose what particle parameter it will set globally to all particles, to each value and and what time. You can make changes to one of these particle parameters (via scenarioParticlesX->parameter):
+- particle_V0 (parameter = 1)
+- particle_beta0 (parameter = 2)
+- particle_chiT (parameter = 3)
+- particle_chiR (parameter = 4)
+- particle_c0 (parameter = 5)
+- particle_DR (parameter = 6)
+
+The set of time values (in time steps) and parameter values to be set are defined in setup in scenarioParticlesX->timesteppoints and scenarioParticlesX->values (both can be one of multiple values, for example, "1.0, 1.1, 1.2").
+
+### Output:
+**Trajectory output in LAMMPS trj format**
+The trajectory output is switched on/off via Output->printTrjs in the setup.
+You can set the min amd max times for trj as general timestep cutoffs for trajectory output. Inside these limits, the trajectory is written in blocks, starting every Output->trjBlockEverySteps, and each block of length Output->trjBlockDurationSteps. The output frequency is controlled by Output->trjBlockFreqSteps (in time steps). as well as output frequency and block pattern. Additional parameteres of the particles can be written to trj (V0, V, beta0, beta, chiT, chiR, c0, DR via Output->trjParticleProperties).
+
+**Radial density distribution**
+- additional to the full cumulative particle density matrix, radial distribution is written now as well. The granilarity of bins over radius is controlled via Output->cumulativeRnbins.
+
+**Individual particle hits versus time**
+The table showing how many *different* particles hitted the target. Controlled by Output->HitCountReg_window and Output->HitCountReg_minStep.
+
+
 
 # GPU Chemotactic Particles Simulator (GCPS)
 
@@ -8,7 +88,7 @@
 
 GCPS is a high-performance simulation framework designed to model the collective dynamics of active matter, specifically focusing on "searcher" particles that interact with a dynamic chemical environment. The simulator couples agent-based Langevin dynamics with a grid-based representation of a scalar field (scent), allowing particles to modify their environment through deposition and navigate it via chemotaxis.
 
-The core physics engine accounts for pairwise particle interactions (e.g., soft repulsion) accelerated by spatial hashing, complex boundary conditions, and varying chemosensitivity models (e.g., gradient vs. log-gradient sensing). A distinguishing feature of GCPS-v7.1 is its extensive support for stochastic resetting mechanisms, allowing researchers to investigate how timed or spatial resets affect search efficiency in complex landscapes populated with active targets. Built on CUDA C++ and OpenMP, GCPS-v7.1 supports multi-stream execution, enabling massive parallel parameter sweeps on a single GPU.
+The core physics engine accounts for pairwise particle interactions (e.g., soft repulsion) accelerated by spatial hashing, complex boundary conditions, and varying chemosensitivity models (e.g., gradient vs. log-gradient sensing). A distinguishing feature of GCPS-v7.10 is its extensive support for stochastic resetting mechanisms, allowing researchers to investigate how timed or spatial resets affect search efficiency in complex landscapes populated with active targets. Built on CUDA C++ and OpenMP, GCPS-v7.10 supports multi-stream execution, enabling massive parallel parameter sweeps on a single GPU.
 
 ## Features
 
@@ -56,12 +136,12 @@ The executable requires 5 command-line arguments to define the simulation enviro
 
 **Syntax:**
 ```bash
-./GCPS-v7.1-sm80 <task.ini> <gpu_id> <num_streams> <seed> <output_prefix>
+./GCPS-v7.10-sm80 <task.ini> <gpu_id> <num_streams> <seed> <output_prefix>
 ```
 
 **Typical execution example:**
 ```bash    
-./GCPS-v7.1-sm80 N1024_tauSC0125_tsim1Kx1.ini 0 8 0 N1024_tauSC0125_tsim1Kx1 > N1024_tauSC0125_tsim1Kx1.out 2>&1 & 
+./GCPS-v7.10-sm80 N1024_tauSC0125_tsim1Kx1.ini 0 8 0 N1024_tauSC0125_tsim1Kx1 > N1024_tauSC0125_tsim1Kx1.out 2>&1 & 
 ```
 
 In this example:
@@ -100,7 +180,7 @@ Standard console output is redirected to .out, as well as error output. Runs in 
 - `kernel_renormSC.cu`
 - `kernel_updateTargets.cu`
 - `kernelTimerAsync.cu`
-- `GCPS-v7.1-main.cu` — TODO: clarify whether main or legacy.
+- `GCPS-v7.10-main.cu` — TODO: clarify whether main or legacy.
 - `logdata.cu`
 - `runner.cu`
 - `setup.cu`

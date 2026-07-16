@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "../include/math/containers/matrix.cu"
+#include "../include/math/math_consts.cu"
 
 #include "runner.cu"
 
@@ -26,7 +27,7 @@ public:
 
     /** Run simulations
     **/
-    int runSimulations() noexcept;
+    int runSimulations(std::string outfname) noexcept;
 
     /** Write statistics to file
     **/
@@ -62,26 +63,32 @@ vc3_phys::KSNPSimulator::KSNPSimulator(vc3_phys::setupParameters setup, int nStr
     cudaError_t cuerr = cudaSetDevice(_cudaDeviceID);
     if (cuerr == cudaSuccess)
     {
-        std::cout << "Using CUDA device #" << _cudaDeviceID << "\n";
+        std::cout << "Using GPU#" << _cudaDeviceID << "\n";
     }
     else
     {
-        std::cout << "CUDA error: can not use CUDA device #" << _cudaDeviceID << "!\n";
+        std::cout << "CUDA error: can not use GPU#" << _cudaDeviceID << "!\n";
         return;
     }
 
     std::cout << "Using " << _nStreams << " streams in parallel for " << _setup.nIterations << " iterations\n";
 }
 
-int vc3_phys::KSNPSimulator::runSimulations() noexcept
+int vc3_phys::KSNPSimulator::runSimulations(std::string outfname) noexcept
 {
     _simulatorTimer.start();
     std::cout << "\nKSNPSimulator::runSimulations() preparing simulations\n";
+#ifdef DEBUG0
+    int mydevice;
+    cudaGetDevice(&mydevice);
+    std::cout << "\nKSNPSimulator::runSimulations() preparing simulations on GPU#" << mydevice << "\n";
+#endif
     std::cout.flush();
 
     int num_threads = _nStreams;
     #pragma omp parallel num_threads(num_threads)
     {
+        cudaSetDevice(_cudaDeviceID);
         cudaStream_t stream1;
         cudaStreamCreateWithFlags(&stream1, cudaStreamNonBlocking);
 
@@ -90,21 +97,20 @@ int vc3_phys::KSNPSimulator::runSimulations() noexcept
         {
             if (iter == 0)
             {
-                std::cout << "CURRENT DEVICE: " << _cudaDeviceID << "\n";
+                std::cout << "CURRENT GPU#" << _cudaDeviceID << "\n";
                 std::cout.flush();
             }
             vc3_general::timer_ms_cuda iterTimer;
             // 6.0 Selecting a device and a stream
             int device;
-            //cudaSetDevice(_cudaDeviceID);
             cudaGetDevice(&device);
-            std::cout << "Run iteration # " << iter << " on GPU # " << device << "\n";
+            std::cout << "Run iteration # " << iter << " on GPU#" << device << "\n";
             std::cout.flush();
 
             // 6.3. Initialize KSNPRunner
             std::cout << "Iteration # " << iter << ": initialize KSNPRunner\n";
             std::cout.flush();
-            vc3_phys::KSNPRunner runner(stream1, _setup, _randseed, iter);
+            vc3_phys::KSNPRunner runner(stream1, _setup, outfname, _randseed, iter);
 
             // 6.4. Run optimization
             std::cout << "Iteration # " << iter << ": run simulations\n";
@@ -198,9 +204,9 @@ int vc3_phys::KSNPSimulator::writeStat(std::string outfname, bool append) noexce
         outf << "\t" << (flt2(bj) + 0.50) * dl * flt2(_setup.cumulativePCblockSize);
     outf << "\n";
 
-    flt2 cumulativeTime = _setup.nSteps - (_setup.cumulativeDataMinTime / _setup.timeStep);
-    if (cumulativeTime <= 0) cumulativeTime = 1.0;
-    flt2 cpcNorm = _setup.nIterations * cumulativeTime;
+    flt2 cumulativeSteps = _setup.nSteps - _setup.cumulativeDataMinStep;
+    if (cumulativeSteps <= 0) cumulativeSteps = 1.0;
+    flt2 cpcNorm = _setup.nIterations * cumulativeSteps;
 
     for (int bi = 0; bi < _totalResults.cumulativeParticleCountMatrix.nRow(); bi++)
     {
@@ -212,6 +218,42 @@ int vc3_phys::KSNPSimulator::writeStat(std::string outfname, bool append) noexce
     outf << "\n";
     outf.close();
     /** / _PCcumulative.txt **/
+
+    /** $ _PCRcumulative.txt **/
+    // This file contains:
+    // - Cumulative particle concentrations from all iterations
+    fileName = outfname + "_PCRcumulative.txt";
+    std::cout << "\nWriting total statistics to file \"" << fileName << "\"\n";
+    if (append) outf.open(fileName.c_str(), std::ios::app);
+    else outf.open(fileName.c_str());
+    if (!outf)
+    {
+        std::cout << "\nCan not open file \"" << fileName << "\"";
+        return 1;
+    }
+
+    flt2 rmin, dr;
+    vc3_math::HISTMODE hm;
+    int np;
+    _totalResults.cumulativeParticleCount_r.getparams(&rmin, &dr, &hm, &np);
+    vc3_math::OArray<flt2> hist;
+    _totalResults.cumulativeParticleCount_r.gethist(&hist);
+    flt2 cpcrNorm = _setup.nIterations * cumulativeSteps;
+
+    outf << "CumulativeRadialParticleConcentration\n"
+        << "1\t1\t1\n"
+        << "PCRsize\t" << _totalResults.cumulativeParticleCount_r.getamount() << "\n";
+
+    outf << "r\tdensity\n";
+    for (int nr = 0; nr < hist.nElem(); nr++)
+    {
+        outf << (double(nr) + 0.50) * dr;
+        outf << "\t" << hist(nr) / cpcrNorm / vc3_cumath::TwoPi / (double(nr) + 0.50) / dr;
+        outf << "\n";
+    }
+    outf << "\n";
+    outf.close();
+    /** / _PCRcumulative.txt **/
 
     /** $ _PCreg.txt **/
     // This file contains:
@@ -341,6 +383,61 @@ int vc3_phys::KSNPSimulator::writeStat(std::string outfname, bool append) noexce
     }
     outf.close();
     /** / _eventsReg.txt **/
+
+    /** $ _eventsPPReg.txt **/
+    fileName = outfname + "_eventsPPReg.txt";
+    std::cout << "Opening output file \"" << fileName << "\"\n";
+    if (append) outf.open(fileName.c_str(), std::ios::app);
+    else outf.open(fileName.c_str());
+    if (!outf)
+    {
+        std::cout << "\nCan not open file \"" << fileName << "\"";
+        return 1;
+    }
+    outf << "\n" << "recordName" << "\n";
+    outf << "Avg nParticles per iteration\n";
+    outf << "Time";
+    outf << "\tnParticles hit target";
+    outf << "\n";
+    for (int q = 0; q < _totalResults.timeRegCumulativeNPTargetHit.size(); q++)
+    {
+        double time = double(q * _setup.HitCountReg_window) * _setup.timeStep;
+        outf << time;
+        outf << "\t" << double(_totalResults.timeRegCumulativeNPTargetHit[q]) / double(_setup.nIterations);
+        outf << "\n";
+    }
+    outf.close();
+    /** / _eventsPPReg.txt **/
+
+    /** $ _timePP.txt **/
+    fileName = outfname + "_timePP.txt";
+    std::cout << "Opening output file \"" << fileName << "\"\n";
+    if (append) outf.open(fileName.c_str(), std::ios::app);
+    else outf.open(fileName.c_str());
+    if (!outf)
+    {
+        std::cout << "\nCan not open file \"" << fileName << "\"";
+        return 1;
+    }
+    outf << "\n" << "recordName" << "\n";
+    outf << "Time for N different particles to hit target\n";
+    outf << "nParticles hit target";
+    outf << "\tTime avg\tTime err\tTime min\tTime max";
+    outf << "\n";
+    for (int q = 0; q < _totalResults.timeNPTargetHit.size(); q++)
+    {
+        double avg, err, min, max;
+        int np = _totalResults.timeNPTargetHit[q].getavg(&avg, &err);
+        min = _totalResults.timeNPTargetHit[q].getmin();
+        max = _totalResults.timeNPTargetHit[q].getmax();
+        outf << q;
+        if (np == 0) outf << "\t--\t--\t--\t--";
+        else if (np == 1) outf << "\t" << avg << "\t--\t" << min << "\t" << max;
+        else outf << "\t" << avg << "\t" << err << "\t" << min << "\t" << max;
+        outf << "\n";
+    }
+    outf.close();
+    /** / _timePP.txt **/
 
     return 0;
 }

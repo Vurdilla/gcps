@@ -4,6 +4,8 @@
 #include <iostream>
 
 #include "../include/math/containers/matrix.cu"
+#include "../include/math/stat/histogramm.cu"
+#include "../include/math/stat/avgerrminmax.cu"
 #include "setup.cu"
 
 namespace vc3_phys
@@ -19,6 +21,9 @@ struct simData
     // Cumulative particle concentration
     vc3_math::Matrix<long long int> cumulativeParticleCountMatrix;
 
+    // Cumulative radial particle distribution
+    vc3_math::Histogramm<flt2> cumulativeParticleCount_r;
+
     // Time regular window-cumulative particle concentration
     std::vector<vc3_math::Matrix<long long int>> timeRegParticleCountMatrix; // particle count over all simulations matrix, size: _param.latticeSize/PCReg_blockSize x _param.latticeSize/PCReg_blockSize
 
@@ -30,7 +35,10 @@ struct simData
     std::vector<std::vector<long long int>> timeRegCumulativeNBoundaryHit; // Number of boundary hits: 0 - total, 1 - previous TR, 2 - previous boundary, 3 - previous target, 4 - previous home
     std::vector<std::vector<long long int>> timeRegCumulativeNTargetHit; // Number of target hits: 0 - total, 1 - previous TR, 2 - previous boundary, 3 - previous target, 4 - previous home
     std::vector<std::vector<long long int>> timeRegCumulativeNHomeHit; // Number of target hits: 0 - total, 1 - previous TR, 2 - previous boundary, 3 - previous target, 4 - previous home
-
+    
+    // Cumulative count of particles hit a target
+    std::vector<long long int> timeRegCumulativeNPTargetHit; // Number of particles with target hits
+    std::vector<vc3_math::stat::AvgErrMinMax> timeNPTargetHit; // Time required for N different particles to hit target
 
     // member functions
 
@@ -59,6 +67,9 @@ int simData::initialize(const setupParameters& setup)
 #endif
     cumulativeParticleCountMatrix.resize(cpcsize, cpcsize);
     cumulativeParticleCountMatrix.set(0);
+
+    // Initialize Cumulative radial particle distribution
+    cumulativeParticleCount_r.change(0.00, setup.boxSize * 0.50, setup.cumulativeRnbins, vc3_math::HISTMODE_EXT);
 
     // Initialize Time regular window-cumulative particle concentration
     int pcnt = (setup.nSteps - setup.PCReg_startstep) / setup.PCReg_window;
@@ -116,6 +127,12 @@ int simData::initialize(const setupParameters& setup)
         fill(timeRegCumulativeNHomeHit[q].begin(), timeRegCumulativeNHomeHit[q].end(), 0);
     }
 
+    // Cumulative count of particles hit a target
+    timeRegCumulativeNPTargetHit.resize(ntrccount);
+    fill(timeRegCumulativeNPTargetHit.begin(), timeRegCumulativeNPTargetHit.end(), 0);
+    timeNPTargetHit.resize(setup.nParticles + 1);
+    for (int q = 0; q < setup.nParticles + 1; q++) timeNPTargetHit[q].reset();
+
     return 0; // Success
 }
 
@@ -143,6 +160,19 @@ int simData::addTo(simData* addto) const
     for (int i = 0; i < cumulativeParticleCountMatrix.nRow(); i++)
         for (int j = 0; j < cumulativeParticleCountMatrix.nCol(); j++)
             addtoCPCM(i, j) += cumulativeParticleCountMatrix(i, j);
+
+    // --- Sum cumulativeParticleCount_r ---
+    vc3_math::Histogramm<flt2>& addtoCPCR = addto->cumulativeParticleCount_r;
+    flt2 xmin, addto_xmin, dx, addto_dx;
+    vc3_math::HISTMODE mode, addto_mode;
+    int amountofdata;
+    cumulativeParticleCount_r.getparams(&xmin, &dx, &mode, &amountofdata);
+    addtoCPCR.getparams(&addto_xmin, &addto_dx, &addto_mode, &amountofdata);    
+    if (addto_xmin != xmin || addto_dx != dx || addto_mode != mode) {
+        std::cerr << "Error: cumulativeParticleCount_r Hostogram parameters do not match for summation." << std::endl;
+        return 2; // Return a different error code
+    }
+    addtoCPCR.merge(cumulativeParticleCount_r);
 
     // --- Sum timeRegParticleCountMatrix ---
     std::vector<vc3_math::Matrix<long long int>> &addtoTRPCM = addto->timeRegParticleCountMatrix;
@@ -219,6 +249,30 @@ int simData::addTo(simData* addto) const
             addtoTRCNTH[q][w] += timeRegCumulativeNTargetHit[q][w];
             addtoTRCNHH[q][w] += timeRegCumulativeNHomeHit[q][w];
         }
+    }
+
+    // Cumulative count of particles hit a target
+    std::vector<long long int>& addtoTRCNPTH = addto->timeRegCumulativeNPTargetHit;
+    if (addtoTRCNPTH.size() != timeRegCumulativeNPTargetHit.size())
+    {
+        std::cerr << "Error: timeRegCumulativeNPTargetHit dimensions do not match for summation." << std::endl;
+        return 5; // Return a different error code
+    }
+    for (int q = 0; q < addtoTRCNPTH.size(); q++)
+    {
+        addtoTRCNPTH[q] += timeRegCumulativeNPTargetHit[q];
+    }
+
+    // Time required for N different particles to hit target
+    std::vector<vc3_math::stat::AvgErrMinMax>& addtoTNPTTH = addto->timeNPTargetHit;
+    if (addtoTNPTTH.size() != timeNPTargetHit.size())
+    {
+        std::cerr << "Error: timeNPTargetHit dimensions do not match for summation." << std::endl;
+        return 6; // Return a different error code
+    }
+    for (int q = 0; q < addtoTNPTTH.size(); q++)
+    {
+        addtoTNPTTH[q].merge(timeNPTargetHit[q]);
     }
 
     return 0; // Success

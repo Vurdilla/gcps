@@ -2,6 +2,7 @@
 #include "config.cu"
 #include "../include/general/stringext.cu"
 #include "../include/general/timer_ms_cuda.cu"
+#include "../include/general/timer.cu"
 #include "../include/math/randgen/uniform_ran2.cu"
 //#include "../include/general/timer_omp.cu"
 //#include "../include/general/timer_omp_cuda.cu"
@@ -22,7 +23,8 @@ int main(int argc, char* argv[])
     std::cout << "\nPROGRAM START\n";
     std::cout.flush();
 #endif
-    vc3_general::timer_ms_cuda timer_total;
+
+    vc3_general::timer timer_total;
     timer_total.start();
 
 #ifdef DEBUG0
@@ -52,7 +54,7 @@ int main(int argc, char* argv[])
     std::cout << "\nRUN KSNPSimulator\n";
     std::cout.flush();
 #endif
-    simulator.runSimulations();    
+    simulator.runSimulations(outfname);
     end = omp_get_wtime();
     printf("\nrunSimulations wall time %f s\n", end - start);
 
@@ -65,7 +67,7 @@ int main(int argc, char* argv[])
     timer_total.stop();
     std::cout << "\n";
     std::cout << "--- Job time summary ---\n";
-    std::cout << "Total wall clock time:\t" << timer_total.get_stime(1) << "\n";
+    std::cout << "Total wall clock time:\t" << timer_total.get_stime(vc3_general::vtfHMS) << "\n";
     std::cout << "[ Did you expect this? ]\n";
 #ifdef DEBUG0
     std::cout << "\nALL DONE\n";
