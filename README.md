@@ -1,4 +1,4 @@
-# BIG UPDATE TO VERSION 7.10 IS HERE 🍭
+# GPU Chemotactic Particles Simulator (GCPS) - BIG UPDATE TO VERSION 7.10 IS HERE 🍭
 
 ## New features
 
